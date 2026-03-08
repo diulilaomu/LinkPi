@@ -31,6 +31,12 @@ class AiService(private val config: AiConfig) {
         enableThinking: Boolean = false
     ): String = chatFull(messages, maxTokens, temperature, enableThinking).content
 
+    /** Single-prompt shorthand (e.g. for intent classification). */
+    suspend fun chat(prompt: String, maxTokens: Int = 10): String {
+        val messages = listOf(mapOf("role" to "user", "content" to prompt))
+        return chat(messages, maxTokens = maxTokens, temperature = 0.0)
+    }
+
     /** Full response including reasoning_content when deep thinking is enabled. */
     suspend fun chatFull(
         messages: List<Map<String, String>>,

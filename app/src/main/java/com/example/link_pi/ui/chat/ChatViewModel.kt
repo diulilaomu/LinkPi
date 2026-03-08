@@ -89,7 +89,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val lastApp = _messages.value.lastOrNull { it.miniApp != null }?.miniApp
                 toolExecutor.latestAppHint = lastApp?.id ?: currentMiniApp?.id
 
-                val result = orchestrator.run(apiMessages, _activeSkill.value.mode, _deepThinking.value) { step ->
+                val result = orchestrator.run(apiMessages, _activeSkill.value, _deepThinking.value) { step ->
                     collectedSteps.add(step)
                     _agentSteps.value = collectedSteps.toList()
                 }
@@ -160,7 +160,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val lastApp = _messages.value.lastOrNull { it.miniApp != null }?.miniApp
                 toolExecutor.latestAppHint = lastApp?.id ?: currentMiniApp?.id
 
-                val result = orchestrator.run(apiMessages, _activeSkill.value.mode, _deepThinking.value) { step ->
+                val result = orchestrator.run(apiMessages, _activeSkill.value, _deepThinking.value) { step ->
                     collectedSteps.add(step)
                     _agentSteps.value = collectedSteps.toList()
                 }

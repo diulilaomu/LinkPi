@@ -5,73 +5,10 @@ import com.example.link_pi.data.model.SkillMode
 
 /**
  * Built-in skills that ship with the app.
+ * systemPrompt contains ONLY role definition + design principles.
+ * Bridge/CDN/Workflow docs are injected dynamically by PromptAssembler.
  */
 object BuiltInSkills {
-
-    private const val NATIVE_BRIDGE_DOCS = """
-Available Native Bridge API (access via window.NativeBridge in generated apps):
-- NativeBridge.showToast(message) — Show a native toast notification
-- NativeBridge.vibrate(milliseconds) — Vibrate device (max 5000ms)
-- NativeBridge.getDeviceInfo() — Returns JSON string: {model, brand, manufacturer, sdkVersion, release}
-- NativeBridge.getLocation() — Returns JSON string: {latitude, longitude, accuracy} or empty string
-- NativeBridge.saveData(key, value) — Save data persistently (isolated per app)
-- NativeBridge.loadData(key) — Load saved data (returns string or empty)
-- NativeBridge.removeData(key) — Remove a stored key
-- NativeBridge.clearData() — Clear all stored data for this app
-- NativeBridge.listKeys() — Returns comma-separated list of all stored keys
-- NativeBridge.getAppId() — Returns the current app's unique ID
-- NativeBridge.writeClipboard(text) — Copy text to clipboard
-- NativeBridge.getBatteryLevel() — Returns battery percentage (0-100)
-- NativeBridge.sendToApp(jsonString) — Send data back to the host app
-- nativeFetch(url, options) — HTTP request (bypasses CORS). Returns Promise like fetch API
-  Usage: nativeFetch('https://api.example.com/data', {method:'GET',headers:{},body:''}).then(r=>r.json()).then(data=>...)
-  Response: {status, statusText, headers, body, ok, json(), text()}
-
-Each mini app has its own isolated storage space. Data saved by one app cannot be accessed by another.
-Always check availability before using: if (window.NativeBridge) { ... }
-"""
-
-    private const val CDN_DOCS = """
-For CDN libraries, use these China-accessible sources (IMPORTANT - do NOT use unpkg/jsdelivr):
-- Vue 3: https://cdn.bootcdn.net/ajax/libs/vue/3.3.4/vue.global.prod.min.js
-- Vue 2: https://cdn.bootcdn.net/ajax/libs/vue/2.7.14/vue.min.js
-- React: https://cdn.bootcdn.net/ajax/libs/react/18.2.0/umd/react.production.min.js
-- ReactDOM: https://cdn.bootcdn.net/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js
-- Chart.js: https://cdn.bootcdn.net/ajax/libs/Chart.js/4.4.0/chart.umd.min.js
-- Three.js: https://cdn.bootcdn.net/ajax/libs/three.js/r128/three.min.js
-- Axios: https://cdn.bootcdn.net/ajax/libs/axios/1.6.0/axios.min.js
-- Animate.css: https://cdn.bootcdn.net/ajax/libs/animate.css/4.1.1/animate.min.css
-Always add onerror fallback for CDN scripts: <script src="cdn_url" onerror="document.title='CDN加载失败:'+this.src"></script>
-Use v-cloak with [v-cloak]{display:none} to hide Vue template syntax before initialization
-"""
-
-    private const val APP_GEN_RULES = """
-Rules for generating apps:
-
-You have TWO modes for generating apps:
-
-### Single-file mode (simple apps):
-1. Generate a SINGLE HTML file with embedded CSS and JavaScript
-2. Wrap your HTML code in ```html code fences
-
-### Multi-file workspace mode (complex apps — PREFERRED):
-1. Use file tools to create separate files: create_file, write_file, append_file, replace_in_file
-2. Always create index.html as the entry point
-3. Reference other files with relative paths: <link href="css/style.css">, <script src="js/app.js">
-4. Organize files in directories: css/, js/, assets/
-5. Use replace_in_file for targeted edits instead of rewriting whole files
-6. Use append_file for segmented/incremental writing of large files
-
-Prefer multi-file mode when the app has significant CSS (>50 lines) or JavaScript (>100 lines).
-
-Common rules for both modes:
-- Use a descriptive <title> tag for the app name
-- Make the app mobile-friendly and responsive (use viewport meta tag)
-- Use modern CSS for a polished, beautiful UI
-- Generate COMPLETE code — never abbreviate or use "// rest of code"
-$CDN_DOCS
-$NATIVE_BRIDGE_DOCS
-"""
 
     val DEFAULT = Skill(
         id = "builtin_default",
@@ -81,11 +18,12 @@ $NATIVE_BRIDGE_DOCS
         systemPrompt = """
 You are LinkPi, an AI assistant that creates mini-applications. When the user asks you to create an app, tool, game, or any interactive feature, generate a complete self-contained HTML application.
 
-$APP_GEN_RULES
-
 If the user asks a normal question (not requesting an app), respond conversationally without generating HTML code.
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK, BridgeGroup.SENSOR, BridgeGroup.NETWORK),
+        cdnGroups = setOf(CdnGroup.FRAMEWORK, CdnGroup.CHART, CdnGroup.THREE_D, CdnGroup.UTILS),
+        extraToolGroups = setOf(ToolGroup.DEVICE, ToolGroup.NETWORK, ToolGroup.MODULE)
     )
 
     val GAME_DEV = Skill(
@@ -104,10 +42,10 @@ Design principles:
 5. Add vibration feedback for key moments (NativeBridge.vibrate)
 6. Progressive difficulty
 7. Beautiful visuals with gradients, shadows, and animations
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK),
+        cdnGroups = emptySet()
     )
 
     val UI_DESIGNER = Skill(
@@ -126,10 +64,10 @@ Design principles:
 5. Glassmorphism, neumorphism, or modern gradient styles when appropriate
 6. Responsive layout that looks great on any screen size
 7. Empty states, loading states, and error states all designed
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK),
+        cdnGroups = setOf(CdnGroup.FRAMEWORK, CdnGroup.UTILS)
     )
 
     val DATA_VIZ = Skill(
@@ -141,17 +79,18 @@ $APP_GEN_RULES
 You are a data visualization specialist. You create interactive charts, dashboards, and data display applications.
 
 Design principles:
-1. Use Chart.js from CDN for charts (bar, line, pie, doughnut, radar, etc.)
+1. Use Chart.js for charts (bar, line, pie, doughnut, radar, etc.)
 2. Interactive: tooltips, zoom, drill-down where appropriate
 3. Real-time data updates with smooth transitions
 4. Dashboard layouts with grid/flex for multiple metrics
 5. Color-coded data with accessible palettes
 6. Support device data via NativeBridge (battery, location, etc.)
 7. Clean, minimal design that lets the data speak
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK, BridgeGroup.SENSOR, BridgeGroup.NETWORK),
+        cdnGroups = setOf(CdnGroup.FRAMEWORK, CdnGroup.CHART, CdnGroup.UTILS),
+        extraToolGroups = setOf(ToolGroup.DEVICE, ToolGroup.NETWORK)
     )
 
     val PRODUCTIVITY = Skill(
@@ -170,10 +109,11 @@ Design principles:
 5. Undo support for destructive actions
 6. Export/share capabilities via NativeBridge.writeClipboard
 7. Timer/reminder features using setInterval and NativeBridge.vibrate
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK),
+        cdnGroups = setOf(CdnGroup.FRAMEWORK),
+        extraToolGroups = setOf(ToolGroup.DEVICE)
     )
 
     val THREE_D = Skill(
@@ -185,17 +125,17 @@ $APP_GEN_RULES
 You are a 3D graphics specialist. You create interactive 3D experiences using Three.js.
 
 Design principles:
-1. Use Three.js from CDN for 3D rendering
+1. Use Three.js for 3D rendering
 2. Touch controls: rotate, zoom, pan with touch gestures
 3. Responsive canvas that fills the viewport
 4. Optimized for mobile GPU: keep polygon count reasonable
 5. Beautiful lighting: ambient + directional + point lights
 6. Animation loops with requestAnimationFrame
 7. Loading indicators while assets initialize
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.UI_FEEDBACK),
+        cdnGroups = setOf(CdnGroup.THREE_D)
     )
 
     val TEACHER = Skill(
@@ -214,10 +154,10 @@ Design principles:
 5. Progress tracking saved via NativeBridge.saveData
 6. Encouraging tone with celebration effects (vibrate on milestones)
 7. Multiple question types: multiple choice, fill-in, matching, sorting
-
-$APP_GEN_RULES
         """.trimIndent(),
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK),
+        cdnGroups = setOf(CdnGroup.FRAMEWORK)
     )
 
     val CHAT_ONLY = Skill(
@@ -235,7 +175,9 @@ Rules:
 4. If the user asks to create an app, politely suggest switching to a different skill mode.
         """.trimIndent(),
         mode = SkillMode.CHAT,
-        isBuiltIn = true
+        isBuiltIn = true,
+        bridgeGroups = emptySet(),
+        cdnGroups = emptySet()
     )
 
     val all: List<Skill> = listOf(

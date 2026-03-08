@@ -1,5 +1,9 @@
 package com.example.link_pi.data.model
 
+import com.example.link_pi.skill.BridgeGroup
+import com.example.link_pi.skill.CdnGroup
+import com.example.link_pi.skill.ToolGroup
+
 /**
  * Knowledge injection mode — controls what context is injected into the AI prompt.
  * - chat: personal info + preferences + memories are injected
@@ -25,5 +29,11 @@ data class Skill(
     val systemPrompt: String,
     val mode: SkillMode = SkillMode.CODING,
     val isBuiltIn: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** NativeBridge API groups to inject when generating apps. */
+    val bridgeGroups: Set<BridgeGroup> = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK),
+    /** CDN library groups to inject when generating apps. */
+    val cdnGroups: Set<CdnGroup> = emptySet(),
+    /** Extra tool groups beyond the Intent×Phase default. */
+    val extraToolGroups: Set<ToolGroup> = emptySet()
 )
