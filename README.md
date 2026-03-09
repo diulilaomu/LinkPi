@@ -1,7 +1,11 @@
+<p align="center">
+  <img src="app/src/main/assets/logo.png" alt="LinkPi Logo" width="120" />
+</p>
+
 # LinkPi — AI 驱动的迷你应用生成平台
 
 <p align="center">
-  <strong>通过自然语言对话，即时生成、运行和管理交互式 HTML5 迷你应用</strong>
+  <em>「愿为AI应用探索的后行者」</em>
 </p>
 
 <p align="center">
