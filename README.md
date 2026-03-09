@@ -1,13 +1,11 @@
 <p align="center">
-  <img src="app/src/main/assets/logo.png" alt="LinkPi Logo" width="120" />
+  <img src="app/src/main/assets/logo.png" alt="LinkPi Logo" width="200" />
 </p>
-
-# LinkPi — AI 驱动的迷你应用生成平台
 
 <p align="center">
   <em>「愿为AI应用探索的后行者」</em>
 </p>
-
+# LinkPi — AI 驱动的迷你应用生成平台
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Android-green" alt="Android" />
   <img src="https://img.shields.io/badge/Kotlin-2.0.21-blue" alt="Kotlin" />
