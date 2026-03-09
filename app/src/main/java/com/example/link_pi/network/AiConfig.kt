@@ -51,6 +51,11 @@ class AiConfig(context: Context) {
         return _models!!
     }
 
+    /** Clear in-memory cache and reload from SharedPreferences. */
+    fun reloadModels() {
+        _models = null
+    }
+
     private fun mutModels(): MutableList<ModelConfig> {
         if (_models == null) _models = loadModels().toMutableList()
         return _models!!

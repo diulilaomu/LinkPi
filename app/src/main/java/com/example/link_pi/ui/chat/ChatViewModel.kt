@@ -185,8 +185,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshModels() {
+        aiConfig.reloadModels()
         _models.value = aiConfig.getModels().toList()
         _activeModelId.value = aiConfig.activeModelId
+        _deepThinking.value = aiConfig.activeModel.enableThinking
     }
 
     fun addAttachment(uri: Uri) {
