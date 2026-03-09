@@ -7,31 +7,31 @@ package com.example.link_pi.skill
 object BridgeDocs {
 
     private val STORAGE = """
-- NativeBridge.saveData(key, value) — Save data persistently (isolated per app)
-- NativeBridge.loadData(key) — Load saved data (returns string or empty)
-- NativeBridge.removeData(key) — Remove a stored key
-- NativeBridge.clearData() — Clear all stored data for this app
-- NativeBridge.listKeys() — Returns comma-separated list of all stored keys
-- NativeBridge.getAppId() — Returns the current app's unique ID
+- NativeBridge.saveData(key, value) — 持久化保存数据（每个应用独立隔离）
+- NativeBridge.loadData(key) — 加载已保存的数据（返回字符串或空）
+- NativeBridge.removeData(key) — 删除已存储的键
+- NativeBridge.clearData() — 清除此应用的所有存储数据
+- NativeBridge.listKeys() — 返回所有已存储键的逗号分隔列表
+- NativeBridge.getAppId() — 返回当前应用的唯一 ID
 """.trimIndent()
 
     private val UI_FEEDBACK = """
-- NativeBridge.showToast(message) — Show a native toast notification
-- NativeBridge.vibrate(milliseconds) — Vibrate device (max 5000ms)
-- NativeBridge.writeClipboard(text) — Copy text to clipboard
-- NativeBridge.sendToApp(jsonString) — Send data back to the host app
+- NativeBridge.showToast(message) — 显示原生 Toast 通知
+- NativeBridge.vibrate(milliseconds) — 设备振动（最长 5000ms）
+- NativeBridge.writeClipboard(text) — 复制文本到剪贴板
+- NativeBridge.sendToApp(jsonString) — 向宿主应用发送数据
 """.trimIndent()
 
     private val SENSOR = """
-- NativeBridge.getDeviceInfo() — Returns JSON string: {model, brand, manufacturer, sdkVersion, release}
-- NativeBridge.getBatteryLevel() — Returns battery percentage (0-100)
-- NativeBridge.getLocation() — Returns JSON string: {latitude, longitude, accuracy} or empty string
+- NativeBridge.getDeviceInfo() — 返回 JSON 字符串：{model, brand, manufacturer, sdkVersion, release}
+- NativeBridge.getBatteryLevel() — 返回电量百分比（0-100）
+- NativeBridge.getLocation() — 返回 JSON 字符串：{latitude, longitude, accuracy}，或空字符串
 """.trimIndent()
 
     private val NETWORK = """
-- nativeFetch(url, options) — HTTP request (bypasses CORS). Returns Promise like fetch API
-  Usage: nativeFetch('https://api.example.com/data', {method:'GET',headers:{},body:''}).then(r=>r.json()).then(data=>...)
-  Response: {status, statusText, headers, body, ok, json(), text()}
+- nativeFetch(url, options) — HTTP 请求（绕过 CORS）。返回类似 fetch API 的 Promise
+  用法：nativeFetch('https://api.example.com/data', {method:'GET',headers:{},body:''}).then(r=>r.json()).then(data=>...)
+  响应：{status, statusText, headers, body, ok, json(), text()}
 """.trimIndent()
 
     private val GROUP_MAP = mapOf(
@@ -49,12 +49,12 @@ object BridgeDocs {
         if (groups.isEmpty()) return ""
         val apis = groups.mapNotNull { GROUP_MAP[it] }.joinToString("\n")
         return """
-### NativeBridge API (use in generated app code via window.NativeBridge)
+### NativeBridge API（在生成的应用代码中通过 window.NativeBridge 使用）
 
 $apis
 
-Each mini app has its own isolated storage space. Data saved by one app cannot be accessed by another.
-Always check availability before using: if (window.NativeBridge) { ... }
+每个迷你应用都有独立的存储空间。一个应用保存的数据无法被另一个应用访问。
+使用前始终检查可用性：if (window.NativeBridge) { ... }
 """.trimIndent()
     }
 }

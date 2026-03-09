@@ -19,6 +19,7 @@ import android.webkit.JavascriptInterface
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import com.example.link_pi.agent.ModuleStorage
+import com.example.link_pi.util.SecurityUtils
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -158,6 +159,7 @@ class NativeBridge(
                 put("id", m.id)
                 put("name", m.name)
                 put("description", m.description)
+                put("protocol", m.protocol)
                 put("endpoints", org.json.JSONArray().apply {
                     m.endpoints.forEach { ep ->
                         put(JSONObject().apply {
@@ -206,8 +208,8 @@ class NativeBridge(
     fun httpRequest(callbackId: String, url: String, method: String, headers: String, body: String) {
         if (!callbackId.matches(Regex("^[a-zA-Z0-9_]+$"))) return
         val uri = Uri.parse(url)
-        if (uri.scheme != "http" && uri.scheme != "https") {
-            callbackToJs(callbackId, JSONObject().put("error", "Only http/https allowed").toString())
+        if (uri.scheme != "https") {
+            callbackToJs(callbackId, JSONObject().put("error", "Only https allowed").toString())
             return
         }
         // Block requests to private/loopback IPs to prevent SSRF
@@ -233,7 +235,11 @@ class NativeBridge(
                 }
                 reqBuilder.method(method.uppercase(), reqBody)
                 val response = httpClient.newCall(reqBuilder.build()).execute()
-                val respBody = response.body?.string() ?: ""
+                val respBody = response.body?.use { rb ->
+                    val src = rb.source()
+                    src.request(5L * 1024 * 1024) // 5MB limit
+                    src.buffer.snapshot().utf8()
+                } ?: ""
                 val respHeaders = JSONObject()
                 response.headers.forEach { (name, value) -> respHeaders.put(name, value) }
                 val result = JSONObject().apply {
@@ -249,6 +255,11 @@ class NativeBridge(
         }
     }
 
+    @JavascriptInterface
+    fun reportError(error: String) {
+        RuntimeErrorCollector.report(appId, error)
+    }
+
     private fun callbackToJs(callbackId: String, json: String) {
         val b64 = Base64.encodeToString(json.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         mainHandler.post {
@@ -261,14 +272,6 @@ class NativeBridge(
     companion object {
         private val httpClient get() = ModuleStorage.httpClient
 
-        /** Check if a hostname resolves to a private/loopback IP range. */
-        private fun isPrivateHost(host: String): Boolean {
-            if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0") return true
-            if (host.startsWith("10.")) return true
-            if (host.startsWith("192.168.")) return true
-            if (host.matches(Regex("^172\\.(1[6-9]|2[0-9]|3[01])\\..*"))) return true
-            if (host.endsWith(".local") && host != "miniapp.local") return true
-            return false
-        }
+        private fun isPrivateHost(host: String): Boolean = SecurityUtils.isPrivateHost(host)
     }
 }

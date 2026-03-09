@@ -72,6 +72,7 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "read_workspace_file" to ToolGroup.APP_READ,
     "list_workspace_files" to ToolGroup.APP_READ,
     "file_info" to ToolGroup.APP_READ,
+    "list_snapshots" to ToolGroup.APP_READ,
     // APP_EDIT
     "replace_in_file" to ToolGroup.APP_EDIT,
     "replace_lines" to ToolGroup.APP_EDIT,
@@ -80,12 +81,16 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "copy_file" to ToolGroup.APP_EDIT,
     "delete_workspace_file" to ToolGroup.APP_EDIT,
     "delete_directory" to ToolGroup.APP_EDIT,
+    "undo_file" to ToolGroup.APP_EDIT,
     // APP_NAVIGATE
     "list_saved_apps" to ToolGroup.APP_NAVIGATE,
     "open_app_workspace" to ToolGroup.APP_NAVIGATE,
     // CODING
     "grep_file" to ToolGroup.CODING,
     "grep_workspace" to ToolGroup.CODING,
+    "get_runtime_errors" to ToolGroup.CODING,
+    "validate_html" to ToolGroup.CODING,
+    "diff_file" to ToolGroup.CODING,
     // DEVICE
     "get_device_info" to ToolGroup.DEVICE,
     "get_battery_level" to ToolGroup.DEVICE,
@@ -94,6 +99,7 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "write_clipboard" to ToolGroup.DEVICE,
     // NETWORK
     "fetch_url" to ToolGroup.NETWORK,
+    "web_search" to ToolGroup.NETWORK,
     "save_data" to ToolGroup.NETWORK,
     "load_data" to ToolGroup.NETWORK,
     // MODULE
@@ -114,7 +120,7 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
 
     when (intent) {
         UserIntent.CONVERSATION, UserIntent.MEMORY_OPS -> {
-            groups.add(ToolGroup.MEMORY)
+            groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.DEVICE, ToolGroup.NETWORK))
         }
         UserIntent.CREATE_APP -> {
             when (phase) {
@@ -122,7 +128,7 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
                     groups.add(ToolGroup.MEMORY)
                 }
                 AgentPhase.GENERATION -> {
-                    groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING))
+                    groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING, ToolGroup.NETWORK))
                 }
                 AgentPhase.REFINEMENT -> {
                     groups.addAll(listOf(ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING))
@@ -132,10 +138,10 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         UserIntent.MODIFY_APP -> {
             when (phase) {
                 AgentPhase.PLANNING -> {
-                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_READ, ToolGroup.APP_NAVIGATE, ToolGroup.CODING))
+                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.NETWORK))
                 }
                 AgentPhase.GENERATION -> {
-                    groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING))
+                    groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.NETWORK))
                 }
                 AgentPhase.REFINEMENT -> {
                     groups.addAll(listOf(ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING))
@@ -147,8 +153,11 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         }
     }
 
-    // Add Skill-level extra groups
-    groups.addAll(extraGroups)
+    // Add Skill-level extra groups (skip during CREATE_APP Planning to keep prompt focused;
+    // MODIFY_APP Planning does real edits, so it needs extra groups like MODULE)
+    if (!(phase == AgentPhase.PLANNING && intent == UserIntent.CREATE_APP)) {
+        groups.addAll(extraGroups)
+    }
 
     return groups
 }

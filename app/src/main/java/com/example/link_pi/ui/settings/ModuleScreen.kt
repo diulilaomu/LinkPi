@@ -1,5 +1,9 @@
 package com.example.link_pi.ui.settings
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,15 +16,20 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,18 +52,66 @@ fun ModuleScreen() {
     val moduleStorage = remember { ModuleStorage(context) }
     var modules by remember { mutableStateOf(moduleStorage.loadAll()) }
     var deleteTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
+    var editTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
+    var exportTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
+
+    // Import launcher
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        try {
+            val jsonStr = context.contentResolver.openInputStream(uri)?.bufferedReader()?.readText() ?: return@rememberLauncherForActivityResult
+            val imported = moduleStorage.importFromJson(jsonStr)
+            if (imported != null) {
+                modules = moduleStorage.loadAll()
+                Toast.makeText(context, "已导入: ${imported.name}", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "导入失败: JSON 格式无效", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "导入失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Export launcher
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        val m = exportTarget ?: return@rememberLauncherForActivityResult
+        try {
+            context.contentResolver.openOutputStream(uri)?.use { os ->
+                os.write(moduleStorage.exportToJson(m).toByteArray())
+            }
+            Toast.makeText(context, "已导出: ${m.name}", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+        exportTarget = null
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        Text(
-            "AI 创建的 API 模块，可供小应用调用",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "AI 创建的 API 模块，可供小应用调用",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
+                Text("导入")
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
 
         if (modules.isEmpty()) {
             Column(
@@ -69,7 +126,7 @@ fun ModuleScreen() {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "在聊天中让 AI 创建 API 模块",
+                    "在聊天中让 AI 创建 API 模块，或点击右上角导入",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                 )
@@ -79,18 +136,24 @@ fun ModuleScreen() {
                 items(modules, key = { it.id }) { module ->
                     ModuleCard(
                         module = module,
-                        onDelete = { deleteTarget = module }
+                        onEdit = { editTarget = module },
+                        onDelete = { deleteTarget = module },
+                        onExport = {
+                            exportTarget = module
+                            exportLauncher.launch("${module.name}.json")
+                        }
                     )
                 }
             }
         }
     }
 
+    // ── Delete dialog ──
     deleteTarget?.let { module ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除模块") },
-            text = { Text("确定删除「${module.name}」？") },
+            text = { Text("确定删除「${module.name}」？此操作不可撤销。") },
             confirmButton = {
                 TextButton(onClick = {
                     moduleStorage.delete(module.id)
@@ -105,15 +168,96 @@ fun ModuleScreen() {
             }
         )
     }
+
+    // ── Edit dialog ──
+    editTarget?.let { module ->
+        EditModuleDialog(
+            module = module,
+            onDismiss = { editTarget = null },
+            onSave = { name, desc, baseUrl, instructions ->
+                moduleStorage.updateModule(
+                    module.id,
+                    name = name.takeIf { it.isNotBlank() },
+                    description = desc.takeIf { it.isNotBlank() },
+                    baseUrl = baseUrl.takeIf { it.isNotBlank() },
+                    instructions = instructions
+                )
+                modules = moduleStorage.loadAll()
+                editTarget = null
+            }
+        )
+    }
+}
+
+@Composable
+private fun EditModuleDialog(
+    module: ModuleStorage.Module,
+    onDismiss: () -> Unit,
+    onSave: (name: String, description: String, baseUrl: String, instructions: String) -> Unit
+) {
+    var name by remember { mutableStateOf(module.name) }
+    var description by remember { mutableStateOf(module.description) }
+    var baseUrl by remember { mutableStateOf(module.baseUrl) }
+    var instructions by remember { mutableStateOf(module.instructions) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑模块") },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("名称") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("描述") },
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = baseUrl,
+                    onValueChange = { baseUrl = it },
+                    label = { Text("基础 URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = instructions,
+                    onValueChange = { instructions = it },
+                    label = { Text("使用说明 (AI 可读)") },
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(name, description, baseUrl, instructions) }) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
 }
 
 @Composable
 private fun ModuleCard(
     module: ModuleStorage.Module,
-    onDelete: () -> Unit
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    onExport: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onEdit),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -126,11 +270,27 @@ private fun ModuleCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        module.name,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            module.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                        if (module.protocol != "HTTP") {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    module.protocol,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                        }
+                    }
                     Text(
                         module.baseUrl,
                         style = MaterialTheme.typography.bodySmall,
@@ -145,6 +305,22 @@ private fun ModuleCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Outlined.Edit,
+                            contentDescription = "编辑",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        )
+                    }
+                    IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
+                        Icon(
+                            Icons.Outlined.Share,
+                            contentDescription = "导出",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
                     IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
                         Icon(
                             Icons.Outlined.Delete,
@@ -187,7 +363,7 @@ private fun ModuleCard(
                             }
                         ) {
                             Text(
-                                ep.method.uppercase(),
+                                if (ep.encoding == "hex") "${ep.method.uppercase()}/HEX" else ep.method.uppercase(),
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Medium,

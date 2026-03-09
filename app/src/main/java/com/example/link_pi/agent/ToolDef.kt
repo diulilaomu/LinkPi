@@ -12,7 +12,7 @@ data class ToolDef(
 ) {
     fun toPromptString(): String {
         val params = parameters.joinToString(", ") {
-            val req = if (it.required) "[required]" else "[optional]"
+            val req = if (it.required) "[必需]" else "[可选]"
             "${it.name}: ${it.type} $req — ${it.description}"
         }
         return "- $name($params): $description"

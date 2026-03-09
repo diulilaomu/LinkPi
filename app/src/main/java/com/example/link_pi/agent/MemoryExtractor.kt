@@ -44,7 +44,8 @@ class MemoryExtractor(
                     mapOf("role" to "system", "content" to SYSTEM_PROMPT),
                     mapOf("role" to "user", "content" to prompt)
                 ),
-                maxTokens = MAX_TOKENS
+                maxTokens = MAX_TOKENS,
+                enableThinking = false
             )
             parseAndSave(response)
         } catch (_: Exception) {

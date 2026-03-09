@@ -9,11 +9,14 @@ import android.location.LocationManager
 import android.os.BatteryManager
 import android.os.Build
 import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.VibratorManager
 import android.widget.Toast
 import androidx.core.app.ActivityCompat
+import com.example.link_pi.bridge.RuntimeErrorCollector
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppStorage
+import com.example.link_pi.util.SecurityUtils
 import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,6 +43,27 @@ class ToolExecutor(
     /** Dynamic module storage. */
     val moduleStorage = ModuleStorage(context)
     private val httpClient get() = ModuleStorage.httpClient
+
+    /** Common tool name aliases the AI may hallucinate. */
+    private val TOOL_ALIASES = mapOf(
+        "read_file" to "read_workspace_file",
+        "readFile" to "read_workspace_file",
+        "read" to "read_workspace_file",
+        "list_files" to "list_workspace_files",
+        "listFiles" to "list_workspace_files",
+        "delete_file" to "delete_workspace_file",
+        "deleteFile" to "delete_workspace_file",
+        "edit_file" to "replace_in_file",
+        "search" to "grep_workspace",
+        "grep" to "grep_workspace",
+        "search_memory" to "memory_search",
+        "save_memory" to "memory_save",
+        "list_memory" to "memory_list",
+        "delete_memory" to "memory_delete",
+        "update_memory" to "memory_update",
+        "list_apps" to "list_saved_apps",
+        "open_workspace" to "open_app_workspace",
+    )
 
     /** All tool definitions the AI can use. */
     val toolDefs: List<ToolDef> = listOf(
@@ -85,6 +109,13 @@ class ToolExecutor(
         ToolDef(
             "fetch_url", "发起HTTP GET请求获取网页或API数据（仅限HTTPS）",
             listOf(ToolParam("url", "string", "目标URL（必须是https://开头）"))
+        ),
+        ToolDef(
+            "web_search", "搜索互联网获取实时信息，当需要最新资讯、不确定的事实或用户明确要求搜索时使用",
+            listOf(
+                ToolParam("query", "string", "搜索关键词"),
+                ToolParam("count", "string", "返回结果数量，默认5，最大10（可选）")
+            )
         ),
         ToolDef(
             "get_current_time", "获取当前日期和时间",
@@ -213,24 +244,29 @@ class ToolExecutor(
 
         // ── Module Tools (Dynamic API Services) ──
         ToolDef(
-            "create_module", "创建一个新的API模块（后台服务）。模块可封装一组HTTP接口，供后续调用",
+            "create_module", "创建一个新的API模块（后台服务）。模块可封装HTTP/TCP/UDP接口，供后续调用。TCP/UDP端点支持hex编码收发二进制数据",
             listOf(
-                ToolParam("name", "string", "模块名称（如 httpbin, weather）"),
+                ToolParam("name", "string", "模块名称（如 httpbin, weather, dlt645_meter）"),
                 ToolParam("description", "string", "模块描述"),
-                ToolParam("base_url", "string", "基础URL（如 https://httpbin.org）"),
+                ToolParam("base_url", "string", "基础URL或主机地址（HTTP如 https://httpbin.org，TCP/UDP如 tcp://192.168.1.100）"),
+                ToolParam("protocol", "string", "通信协议: HTTP（默认）、TCP、UDP", required = false),
+                ToolParam("allow_private_network", "string", "是否允许访问局域网/私有IP地址（true/false，默认false）。DTU网关、本地设备等场景需设为true", required = false),
                 ToolParam("default_headers", "string", "默认请求头JSON（如 {\"Authorization\":\"Bearer xxx\"}）", required = false),
-                ToolParam("endpoints", "string", "端点列表JSON数组，格式: [{\"name\":\"get_ip\",\"path\":\"/ip\",\"method\":\"GET\",\"description\":\"获取IP\"}]", required = false)
+                ToolParam("endpoints", "string", "端点列表JSON数组，格式: [{\"name\":\"read_meter\",\"path\":\"/api\",\"method\":\"GET\",\"port\":8600,\"encoding\":\"hex\",\"body_template\":\"68 ...\",\"description\":\"读电表\"}]。encoding可选utf8(默认)或hex(二进制协议)", required = false),
+                ToolParam("instructions", "string", "模块使用说明（详细的接口文档、参数格式、调用示例、注意事项等）。AI 在 list_modules 时可阅读此字段了解如何使用模块", required = false)
             )
         ),
         ToolDef(
             "add_module_endpoint", "给已有模块添加一个新的API端点",
             listOf(
                 ToolParam("module_id", "string", "模块ID（从list_modules获取）"),
-                ToolParam("name", "string", "端点名称（如 post_data）"),
-                ToolParam("path", "string", "请求路径（如 /post，支持{{param}}占位符）"),
+                ToolParam("name", "string", "端点名称（如 post_data, read_meter）"),
+                ToolParam("path", "string", "请求路径（HTTP如 /post，TCP/UDP可留空。支持{{param}}占位符）"),
                 ToolParam("method", "string", "HTTP方法: GET/POST/PUT/DELETE", required = false),
+                ToolParam("port", "string", "TCP/UDP端口号", required = false),
+                ToolParam("encoding", "string", "数据编码: utf8（默认，文本）或 hex（十六进制，二进制协议）", required = false),
                 ToolParam("headers", "string", "额外请求头JSON", required = false),
-                ToolParam("body_template", "string", "请求体模板，支持{{param}}占位符", required = false),
+                ToolParam("body_template", "string", "请求体模板，支持{{param}}占位符。hex模式下为十六进制字符串如 '68 AA AA AA AA AA AA 68'", required = false),
                 ToolParam("description", "string", "端点描述", required = false)
             )
         ),
@@ -242,7 +278,7 @@ class ToolExecutor(
             )
         ),
         ToolDef(
-            "call_module", "调用模块的某个端点执行HTTP请求",
+            "call_module", "调用模块的某个端点执行HTTP/TCP/UDP请求",
             listOf(
                 ToolParam("module", "string", "模块名称或ID"),
                 ToolParam("endpoint", "string", "端点名称"),
@@ -260,7 +296,8 @@ class ToolExecutor(
                 ToolParam("name", "string", "新名称", required = false),
                 ToolParam("description", "string", "新描述", required = false),
                 ToolParam("base_url", "string", "新基础URL", required = false),
-                ToolParam("default_headers", "string", "新默认请求头JSON", required = false)
+                ToolParam("default_headers", "string", "新默认请求头JSON", required = false),
+                ToolParam("instructions", "string", "新的使用说明", required = false)
             )
         ),
         ToolDef(
@@ -296,6 +333,26 @@ class ToolExecutor(
         ToolDef(
             "file_info", "获取文件或目录的详细信息（大小、行数、字符数、修改时间等）",
             listOf(ToolParam("path", "string", "相对路径"))
+        ),
+        ToolDef(
+            "get_runtime_errors", "获取当前应用WebView中的JS运行时错误列表，用于诊断和修复",
+            listOf(ToolParam("clear", "boolean", "获取后是否清除错误列表，默认true", required = false))
+        ),
+        ToolDef(
+            "undo_file", "撤销文件的最近一次修改，恢复到上一个快照版本",
+            listOf(ToolParam("path", "string", "要撤销的文件相对路径"))
+        ),
+        ToolDef(
+            "list_snapshots", "列出文件的所有快照版本",
+            listOf(ToolParam("path", "string", "文件相对路径"))
+        ),
+        ToolDef(
+            "validate_html", "校验HTML文件的语法问题（未闭合标签、缺失doctype、JS语法错误提示等）",
+            listOf(ToolParam("path", "string", "HTML文件相对路径"))
+        ),
+        ToolDef(
+            "diff_file", "对比文件当前内容与最近快照的差异，输出unified diff格式",
+            listOf(ToolParam("path", "string", "文件相对路径"))
         )
     )
 
@@ -303,7 +360,9 @@ class ToolExecutor(
         try {
             // Normalize argument keys to match tool parameter definitions
             val args = normalizeArgs(call.toolName, call.arguments)
-            val normalizedCall = call.copy(arguments = args)
+            // Auto-correct common tool name aliases the AI may hallucinate
+            val toolName = TOOL_ALIASES.getOrDefault(call.toolName, call.toolName)
+            val normalizedCall = call.copy(toolName = toolName, arguments = args)
             val result = when (normalizedCall.toolName) {
                 "get_device_info" -> executeGetDeviceInfo()
                 "get_battery_level" -> executeGetBattery()
@@ -315,6 +374,7 @@ class ToolExecutor(
                 "load_data" -> executeLoadData(args)
                 "list_saved_apps" -> executeListApps()
                 "fetch_url" -> executeFetchUrl(args)
+                "web_search" -> executeWebSearch(args)
                 "get_current_time" -> executeGetTime()
                 "calculate" -> executeCalculate(args)
                 // File system tools
@@ -344,6 +404,11 @@ class ToolExecutor(
                 "grep_workspace" -> workspaceManager.grepWorkspace(currentAppId, args["pattern"] ?: "", args["is_regex"]?.toBooleanStrictOrNull() ?: true, args["file_filter"] ?: "")
                 "insert_lines" -> workspaceManager.insertLines(currentAppId, args["path"] ?: "", args["line"]?.toIntOrNull() ?: 1, args["content"] ?: "")
                 "file_info" -> workspaceManager.fileInfo(currentAppId, args["path"] ?: "")
+                "get_runtime_errors" -> executeGetRuntimeErrors(args)
+                "undo_file" -> workspaceManager.undoFile(currentAppId, args["path"] ?: "")
+                "list_snapshots" -> workspaceManager.listSnapshots(currentAppId, args["path"] ?: "")
+                "validate_html" -> workspaceManager.validateHtml(currentAppId, args["path"] ?: "")
+                "diff_file" -> workspaceManager.diffFile(currentAppId, args["path"] ?: "")
                 // Memory tools
                 "memory_save" -> executeMemorySave(args)
                 "memory_search" -> executeMemorySearch(args)
@@ -358,7 +423,7 @@ class ToolExecutor(
                 "list_modules" -> executeListModules()
                 "update_module" -> executeUpdateModule(args)
                 "delete_module" -> executeDeleteModule(args)
-                else -> return@withContext ToolResult(normalizedCall.toolName, false, "Unknown tool: ${normalizedCall.toolName}")
+                else -> return@withContext ToolResult(normalizedCall.toolName, false, "Error: 未知工具: ${normalizedCall.toolName}")
             }
             val success = !result.startsWith("Error:")
             // If a file tool failed or returned empty on an uninitialized workspace, hint to open_app_workspace
@@ -376,7 +441,8 @@ class ToolExecutor(
         "replace_in_file", "replace_lines", "create_directory",
         "list_workspace_files", "delete_workspace_file", "delete_directory",
         "rename_file", "copy_file", "grep_file", "grep_workspace",
-        "insert_lines", "file_info"
+        "insert_lines", "file_info", "undo_file", "list_snapshots",
+        "validate_html", "diff_file"
     )
 
     /**
@@ -391,7 +457,15 @@ class ToolExecutor(
         if (savedApps.isEmpty()) return result
 
         val appList = savedApps.joinToString(", ") { "'${it.name}'(id=${it.id})" }
-        return "$result\n\n[Hint] Current workspace is empty. To access an existing app's files, call open_app_workspace first. Saved apps: $appList"
+        return "$result\n\n[提示] 当前工作空间为空。如需访问已有应用的文件，请先调用 open_app_workspace。已保存的应用: $appList"
+    }
+
+    private fun executeGetRuntimeErrors(args: Map<String, String>): String {
+        val errors = RuntimeErrorCollector.getErrors(currentAppId)
+        val shouldClear = args["clear"]?.toBooleanStrictOrNull() ?: true
+        if (shouldClear) RuntimeErrorCollector.clear(currentAppId)
+        if (errors.isEmpty()) return "没有运行时错误"
+        return "共 ${errors.size} 个运行时错误:\n" + errors.mapIndexed { i, e -> "${i + 1}. $e" }.joinToString("\n")
     }
 
     private fun executeGetDeviceInfo(): String {
@@ -419,7 +493,7 @@ class ToolExecutor(
             ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION)
             != PackageManager.PERMISSION_GRANTED
         ) {
-            return "Location permission not granted"
+            return "未授予位置权限"
         }
         val loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
             ?: lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
@@ -430,7 +504,7 @@ class ToolExecutor(
                 put("accuracy", loc.accuracy.toDouble())
             }.toString(2)
         } else {
-            "Location unavailable"
+            "无法获取位置信息"
         }
     }
 
@@ -441,46 +515,50 @@ class ToolExecutor(
             vm.defaultVibrator.vibrate(
                 VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)
             )
+        } else {
+            @Suppress("DEPRECATION")
+            val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            vibrator.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
         }
-        return "Vibrated for ${ms}ms"
+        return "已振动 ${ms}ms"
     }
 
     private suspend fun executeShowToast(args: Map<String, String>): String {
-        val message = args["message"] ?: "No message"
+        val message = args["message"] ?: return "Error: 未提供消息内容"
         withContext(Dispatchers.Main) {
             Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
-        return "Toast shown: $message"
+        return "已显示 Toast: $message"
     }
 
     private suspend fun executeWriteClipboard(args: Map<String, String>): String {
-        val text = args["text"] ?: return "No text provided"
+        val text = args["text"] ?: return "Error: 未提供文本内容"
         withContext(Dispatchers.Main) {
             val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cb.setPrimaryClip(ClipData.newPlainText("text", text))
         }
-        return "Copied to clipboard"
+        return "已复制到剪贴板"
     }
 
     private fun executeSaveData(args: Map<String, String>): String {
-        val key = args["key"] ?: return "No key provided"
-        val value = args["value"] ?: return "No value provided"
+        val key = args["key"] ?: return "Error: 未提供 key"
+        val value = args["value"] ?: return "Error: 未提供 value"
         context.getSharedPreferences("agent_data", Context.MODE_PRIVATE)
             .edit().putString(key, value).apply()
-        return "Data saved: $key"
+        return "数据已保存: $key"
     }
 
     private fun executeLoadData(args: Map<String, String>): String {
-        val key = args["key"] ?: return "No key provided"
+        val key = args["key"] ?: return "Error: 未提供 key"
         val value = context.getSharedPreferences("agent_data", Context.MODE_PRIVATE)
             .getString(key, null)
-        return value ?: "(no data found for key: $key)"
+        return value ?: "(未找到 key: $key 的数据)"
     }
 
     private fun executeListApps(): String {
         val apps = miniAppStorage.loadAll()
         lastListedApps = apps
-        if (apps.isEmpty()) return "No saved apps"
+        if (apps.isEmpty()) return "没有已保存的应用"
         val arr = JSONArray()
         for (app in apps) {
             arr.put(JSONObject().apply {
@@ -493,16 +571,62 @@ class ToolExecutor(
     }
 
     private fun executeFetchUrl(args: Map<String, String>): String {
-        val url = args["url"] ?: return "No URL provided"
+        val url = args["url"] ?: return "Error: 未提供 URL"
         // Security: only allow HTTPS
         if (!url.startsWith("https://")) {
-            return "Only HTTPS URLs are allowed"
+            return "Error: 仅允许 HTTPS URL"
+        }
+        // Security: block requests to private/loopback IPs (SSRF protection)
+        val host = try { java.net.URI(url).host ?: "" } catch (_: Exception) { "" }
+        if (isPrivateHost(host)) {
+            return "Error: 不允许访问私有/内网地址"
         }
         val request = Request.Builder().url(url).get().build()
         val response = httpClient.newCall(request).execute()
         val body = response.body?.string() ?: ""
         // Limit response size
-        return if (body.length > 4000) body.take(4000) + "\n...(truncated)" else body
+        return if (body.length > 4000) body.take(4000) + "\n...(已截断)" else body
+    }
+
+    private fun executeWebSearch(args: Map<String, String>): String {
+        val query = args["query"] ?: return "Error: 未提供搜索关键词"
+        val count = (args["count"]?.toIntOrNull() ?: 5).coerceIn(1, 10)
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+        val url = "https://html.duckduckgo.com/html/?q=$encodedQuery"
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+            .get()
+            .build()
+        val response = httpClient.newCall(request).execute()
+        val html = response.body?.string() ?: return "Error: 搜索请求失败"
+        return parseDuckDuckGoResults(html, count)
+    }
+
+    private fun parseDuckDuckGoResults(html: String, count: Int): String {
+        val results = mutableListOf<String>()
+        // Match each search result block: title + URL + snippet
+        val resultRegex = Regex(
+            """<a[^>]+class="result__a"[^>]*href="([^"]*)"[^>]*>(.+?)</a>[\s\S]*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>"""
+        )
+        for (match in resultRegex.findAll(html)) {
+            if (results.size >= count) break
+            val rawUrl = match.groupValues[1]
+            val title = match.groupValues[2].replace(Regex("<[^>]+>"), "").trim()
+            val snippet = match.groupValues[3].replace(Regex("<[^>]+>"), "").trim()
+            // DuckDuckGo wraps URLs in a redirect; extract the actual URL
+            val actualUrl = try {
+                val params = java.net.URI(rawUrl).query?.split("&") ?: emptyList()
+                val uddg = params.firstOrNull { it.startsWith("uddg=") }
+                if (uddg != null) java.net.URLDecoder.decode(uddg.substringAfter("uddg="), "UTF-8") else rawUrl
+            } catch (_: Exception) { rawUrl }
+            results.add("${results.size + 1}. $title\n   $actualUrl\n   $snippet")
+        }
+        return if (results.isEmpty()) {
+            "未找到相关搜索结果"
+        } else {
+            "搜索结果:\n\n" + results.joinToString("\n\n")
+        }
     }
 
     private fun executeGetTime(): String {
@@ -510,16 +634,19 @@ class ToolExecutor(
         return sdf.format(java.util.Date())
     }
 
+    /** Check if a hostname resolves to a private/loopback IP range (SSRF protection). */
+    private fun isPrivateHost(host: String): Boolean = SecurityUtils.isPrivateHost(host)
+
     private fun executeCalculate(args: Map<String, String>): String {
-        val expr = args["expression"] ?: return "No expression"
+        val expr = args["expression"] ?: return "Error: 未提供表达式"
         // Simple safe evaluator for basic math
         return try {
             val sanitized = expr.replace(Regex("[^0-9+\\-*/().%\\s]"), "")
-            if (sanitized != expr.trim()) return "Expression contains invalid characters"
+            if (sanitized != expr.trim()) return "Error: 表达式包含无效字符"
             val result = evalMath(sanitized)
             result.toBigDecimal().stripTrailingZeros().toPlainString()
         } catch (e: Exception) {
-            "Calculation error: ${e.message}"
+            "Error: 计算错误: ${e.message}"
         }
     }
 
@@ -530,7 +657,7 @@ class ToolExecutor(
 
             fun parse(): Double {
                 val result = parseExpr()
-                if (pos < str.length) throw RuntimeException("Unexpected: ${str[pos]}")
+                if (pos < str.length) throw RuntimeException("意外的字符: ${str[pos]}")
                 return result
             }
 
@@ -551,7 +678,7 @@ class ToolExecutor(
                 while (pos < str.length) {
                     when (str[pos]) {
                         '*' -> { pos++; x *= parseFactor() }
-                        '/' -> { pos++; val d = parseFactor(); if (d == 0.0) throw ArithmeticException("Division by zero"); x /= d }
+                        '/' -> { pos++; val d = parseFactor(); if (d == 0.0) throw ArithmeticException("除数不能为零"); x /= d }
                         '%' -> { pos++; x %= parseFactor() }
                         else -> break
                     }
@@ -570,7 +697,7 @@ class ToolExecutor(
                 }
                 val start = pos
                 while (pos < str.length && (str[pos].isDigit() || str[pos] == '.')) pos++
-                if (start == pos) throw RuntimeException("Expected number at pos $pos")
+                if (start == pos) throw RuntimeException("位置 $pos 处缺少数字")
                 return str.substring(start, pos).toDouble()
             }
         }.parse()
@@ -581,7 +708,7 @@ class ToolExecutor(
         val appName = args["app_name"]?.takeIf { it.isNotBlank() }
 
         val allApps = miniAppStorage.loadAll()
-        if (allApps.isEmpty()) return "Error: no saved apps. Nothing to modify."
+        if (allApps.isEmpty()) return "Error: 没有已保存的应用，无法修改。"
 
         // ── Auto-resolve: no usable args ──
         if (appId == null && appName == null) {
@@ -629,9 +756,9 @@ class ToolExecutor(
         val examples = allApps.joinToString("\n") { app ->
             "  - \"${app.name}\" → app_id=\"${app.id}\""
         }
-        return """Error: app_id is required. Choose one and call again:
+        return """Error: 需要 app_id。请从以下列表中选择一个并重新调用:
 $examples
-Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
+示例: open_app_workspace(app_id=\"<从上方复制id>\")""".trimIndent()
     }
 
     private fun openAppById(app: MiniApp): String {
@@ -640,13 +767,13 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
         if (app.isWorkspaceApp && workspaceManager.hasFiles(app.id)) {
             // Workspace app — files already exist
             val files = workspaceManager.getAllFiles(app.id)
-            return "Opened workspace for: ${app.name}\nFiles:\n${files.joinToString("\n") { "  $it" }}"
+            return "已打开工作空间: ${app.name}\n文件列表:\n${files.joinToString("\n") { "  $it" }}"
         } else if (app.htmlContent.isNotBlank()) {
             // Single-file app — create workspace from htmlContent
             workspaceManager.writeFile(app.id, "index.html", app.htmlContent)
-            return "Opened workspace for: ${app.name}\nConverted single-file app to workspace.\nFiles:\n  index.html"
+            return "已打开工作空间: ${app.name}\n已将单文件应用转换为工作空间。\n文件列表:\n  index.html"
         }
-        return "Opened workspace for: ${app.name} (empty)"
+        return "已打开工作空间: ${app.name} (空)"
     }
 
     // ── Memory Tool Implementations ──
@@ -658,14 +785,14 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
             ?.map { it.trim() }?.filter { it.isNotEmpty() }
             ?: emptyList()
         val memory = memoryStorage.save(content, tags)
-        return "Memory saved (id=${memory.id}, tags=${memory.tags.joinToString(",")})"
+        return "记忆已保存 (id=${memory.id}, tags=${memory.tags.joinToString(",")})"
     }
 
     private fun executeMemorySearch(args: Map<String, String>): String {
         val query = args["query"]?.takeIf { it.isNotBlank() }
             ?: return "Error: query is required"
         val results = memoryStorage.search(query)
-        if (results.isEmpty()) return "No memories found for: $query"
+        if (results.isEmpty()) return "未找到与“$query”相关的记忆"
         val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
         return results.joinToString("\n---\n") { m ->
             "[${m.id}] (${m.tags.joinToString(",")}) ${sdf.format(java.util.Date(m.updatedAt))}\n${m.content}"
@@ -674,9 +801,9 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
 
     private fun executeMemoryList(): String {
         val all = memoryStorage.listAll()
-        if (all.isEmpty()) return "No memories saved yet."
+        if (all.isEmpty()) return "还没有保存任何记忆。"
         val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
-        return "Total: ${all.size}\n" + all.joinToString("\n") { m ->
+        return "总计: ${all.size}\n" + all.joinToString("\n") { m ->
             "[${m.id}] (${m.tags.joinToString(",")}) ${sdf.format(java.util.Date(m.updatedAt))} — ${m.content.take(80)}"
         }
     }
@@ -684,8 +811,8 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
     private fun executeMemoryDelete(args: Map<String, String>): String {
         val id = args["id"]?.takeIf { it.isNotBlank() }
             ?: return "Error: id is required"
-        return if (memoryStorage.delete(id)) "Memory $id deleted."
-        else "Error: memory $id not found."
+        return if (memoryStorage.delete(id)) "记忆 $id 已删除。"
+        else "Error: 记忆 $id 未找到。"
     }
 
     private fun executeMemoryUpdate(args: Map<String, String>): String {
@@ -694,10 +821,10 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
         val content = args["content"]?.takeIf { it.isNotBlank() }
         val tags = args["tags"]?.split(Regex("[,，;；]+"))
             ?.map { it.trim() }?.filter { it.isNotEmpty() }
-        if (content == null && tags == null) return "Error: provide content or tags to update"
+        if (content == null && tags == null) return "Error: 请提供 content 或 tags 来更新"
         val updated = memoryStorage.update(id, content, tags)
-            ?: return "Error: memory $id not found."
-        return "Memory $id updated. tags=${updated.tags.joinToString(",")}"
+            ?: return "Error: 记忆 $id 未找到。"
+        return "记忆 $id 已更新。tags=${updated.tags.joinToString(",")}"
     }
 
     // ── Module Tool Implementations ──
@@ -708,6 +835,9 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
         val description = args["description"]?.takeIf { it.isNotBlank() } ?: ""
         val baseUrl = args["base_url"]?.takeIf { it.isNotBlank() }
             ?: return "Error: base_url is required"
+        val protocol = args["protocol"]?.takeIf { it.isNotBlank() }?.uppercase() ?: "HTTP"
+        val allowPrivateNetwork = args["allow_private_network"]?.equals("true", ignoreCase = true) ?: false
+        val instructions = args["instructions"]?.takeIf { it.isNotBlank() } ?: ""
 
         val defaultHeaders = mutableMapOf<String, String>()
         args["default_headers"]?.takeIf { it.isNotBlank() }?.let {
@@ -733,14 +863,16 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
                         method = ep.optString("method", "GET"),
                         headers = epHeaders,
                         bodyTemplate = ep.optString("body_template", ep.optString("bodyTemplate", "")),
-                        description = ep.optString("description", "")
+                        description = ep.optString("description", ""),
+                        port = ep.optInt("port", 0),
+                        encoding = ep.optString("encoding", "utf8")
                     ))
                 }
             } catch (_: Exception) {}
         }
 
-        val module = moduleStorage.create(name, description, baseUrl, defaultHeaders, endpoints)
-        return "Module created: ${module.name} (id=${module.id}, ${module.endpoints.size} endpoints)"
+        val module = moduleStorage.create(name, description, baseUrl, protocol, defaultHeaders, endpoints, allowPrivateNetwork, instructions)
+        return "模块已创建: ${module.name} (id=${module.id}, protocol=${module.protocol}, allowPrivateNetwork=${module.allowPrivateNetwork}, ${module.endpoints.size} 个端点)"
     }
 
     private fun executeAddEndpoint(args: Map<String, String>): String {
@@ -748,9 +880,10 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
             ?: return "Error: module_id is required"
         val name = args["name"]?.takeIf { it.isNotBlank() }
             ?: return "Error: endpoint name is required"
-        val path = args["path"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: path is required"
+        val path = args["path"] ?: ""
         val method = args["method"]?.uppercase() ?: "GET"
+        val port = args["port"]?.toIntOrNull() ?: 0
+        val encoding = args["encoding"]?.takeIf { it.isNotBlank() } ?: "utf8"
 
         val headers = mutableMapOf<String, String>()
         args["headers"]?.takeIf { it.isNotBlank() }?.let {
@@ -763,10 +896,10 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
         val bodyTemplate = args["body_template"] ?: ""
         val description = args["description"] ?: ""
 
-        val endpoint = ModuleStorage.Endpoint(name, path, method, headers, bodyTemplate, description)
+        val endpoint = ModuleStorage.Endpoint(name, path, method, headers, bodyTemplate, description, port, encoding)
         val module = moduleStorage.addEndpoint(moduleId, endpoint)
-            ?: return "Error: module '$moduleId' not found"
-        return "Endpoint '$name' added to module '${module.name}'. Total endpoints: ${module.endpoints.size}"
+            ?: return "Error: 模块 '$moduleId' 未找到"
+        return "端点 '$name' 已添加到模块 '${module.name}'。总端点数: ${module.endpoints.size}"
     }
 
     private fun executeRemoveEndpoint(args: Map<String, String>): String {
@@ -775,8 +908,8 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
         val endpointName = args["endpoint_name"]?.takeIf { it.isNotBlank() }
             ?: return "Error: endpoint_name is required"
         val module = moduleStorage.removeEndpoint(moduleId, endpointName)
-            ?: return "Error: module '$moduleId' not found"
-        return "Endpoint '$endpointName' removed from module '${module.name}'"
+            ?: return "Error: 模块 '$moduleId' 未找到"
+        return "端点 '$endpointName' 已从模块 '${module.name}' 中移除"
     }
 
     private fun executeCallModule(args: Map<String, String>): String {
@@ -786,7 +919,7 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
             ?: return "Error: endpoint name is required"
 
         val module = moduleStorage.loadById(moduleRef) ?: moduleStorage.findByName(moduleRef)
-            ?: return "Error: module '$moduleRef' not found. Use list_modules to see available modules."
+            ?: return "Error: 模块 '$moduleRef' 未找到。请使用 list_modules 查看可用模块。"
 
         val params = mutableMapOf<String, String>()
         args["params"]?.takeIf { it.isNotBlank() }?.let {
@@ -801,20 +934,25 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
 
     private fun executeListModules(): String {
         val modules = moduleStorage.loadAll()
-        if (modules.isEmpty()) return "No modules created yet."
+        if (modules.isEmpty()) return "还没有创建任何模块。"
         val arr = JSONArray()
         for (m in modules) {
             arr.put(JSONObject().apply {
                 put("id", m.id)
                 put("name", m.name)
                 put("description", m.description)
+                put("instructions", m.instructions)
+                put("protocol", m.protocol)
                 put("baseUrl", m.baseUrl)
+                put("allowPrivateNetwork", m.allowPrivateNetwork)
                 put("endpoints", JSONArray().apply {
                     m.endpoints.forEach { ep ->
                         put(JSONObject().apply {
                             put("name", ep.name)
                             put("method", ep.method)
                             put("path", ep.path)
+                            put("port", ep.port)
+                            put("encoding", ep.encoding)
                             put("description", ep.description)
                         })
                     }
@@ -839,16 +977,17 @@ Example: open_app_workspace(app_id=\"<paste id from above>\")""".trimIndent()
             name = args["name"]?.takeIf { it.isNotBlank() },
             description = args["description"]?.takeIf { it.isNotBlank() },
             baseUrl = args["base_url"]?.takeIf { it.isNotBlank() },
-            defaultHeaders = if (defaultHeaders.isNotEmpty()) defaultHeaders else null
-        ) ?: return "Error: module '$moduleId' not found"
-        return "Module '${module.name}' updated (id=${module.id})"
+            defaultHeaders = if (defaultHeaders.isNotEmpty()) defaultHeaders else null,
+            instructions = args["instructions"]?.takeIf { it.isNotBlank() }
+        ) ?: return "Error: 模块 '$moduleId' 未找到"
+        return "模块 '${module.name}' 已更新 (id=${module.id})"
     }
 
     private fun executeDeleteModule(args: Map<String, String>): String {
         val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
             ?: return "Error: module_id is required"
-        return if (moduleStorage.delete(moduleId)) "Module $moduleId deleted."
-        else "Error: module $moduleId not found."
+        return if (moduleStorage.delete(moduleId)) "模块 $moduleId 已删除。"
+        else "Error: 模块 $moduleId 未找到。"
     }
 
     /**

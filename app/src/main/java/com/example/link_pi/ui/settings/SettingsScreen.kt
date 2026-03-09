@@ -20,6 +20,7 @@ import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -44,10 +45,11 @@ fun SettingsScreen(
     onNavigate: (String) -> Unit = {}
 ) {
     val items = listOf(
-        SettingsItem(Icons.Outlined.Key, "API 配置", "模型、接口地址、密钥", "settings/api"),
+        SettingsItem(Icons.Outlined.Key, "模型管理", "已设模型、预设、自定义配置", "settings/models"),
         SettingsItem(Icons.Outlined.Extension, "Skill 管理", "内置与自定义 Skill", "settings/skills"),
         SettingsItem(Icons.Outlined.Psychology, "长期记忆", "AI 记住的偏好与信息", "settings/memory"),
         SettingsItem(Icons.Outlined.Inventory2, "模块管理", "AI 创建的 API 服务模块", "settings/modules"),
+        SettingsItem(Icons.Outlined.Share, "本地分享", "局域网分享 Skill、模块、应用", "settings/share"),
     )
 
     Column(
@@ -82,7 +84,7 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(24.dp))
 
         Text(
-            text = "LinkPi · AI 驱动的小应用生成平台",
+            text = "© Wenhe X Rnzy  2026.3.2  LinkPi  MIT",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
             modifier = Modifier.align(Alignment.CenterHorizontally)

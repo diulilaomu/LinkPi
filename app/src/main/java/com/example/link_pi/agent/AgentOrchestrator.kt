@@ -1,10 +1,12 @@
 package com.example.link_pi.agent
 
+import com.example.link_pi.bridge.RuntimeErrorCollector
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.data.model.Skill
 import com.example.link_pi.data.model.SkillMode
 import com.example.link_pi.miniapp.MiniAppParser
 import com.example.link_pi.network.AiService
+import com.example.link_pi.network.ChatResponse
 import com.example.link_pi.skill.AgentPhase
 import com.example.link_pi.skill.IntentClassifier
 import com.example.link_pi.skill.PromptAssembler
@@ -30,7 +32,7 @@ class AgentOrchestrator(
 ) {
     companion object {
         private const val MAX_TOOL_ITERATIONS = 15
-        private const val PLANNING_TOKENS = 4096
+        private const val PLANNING_TOKENS = 16384
         private const val GENERATION_TOKENS = 65536
         private val FILE_TOOLS = setOf("create_file", "write_file", "append_file", "replace_in_file", "replace_lines", "insert_lines", "create_directory", "delete_directory", "delete_workspace_file", "rename_file", "copy_file")
     }
@@ -39,9 +41,22 @@ class AgentOrchestrator(
         conversationMessages: List<Map<String, String>>,
         skill: Skill,
         enableThinking: Boolean = false,
-        onStep: suspend (AgentStep) -> Unit
+        injectionSkills: List<Skill> = emptyList(),
+        onStep: suspend (AgentStep) -> Unit,
+        onStepSync: ((AgentStep) -> Unit)? = null
     ): OrchestratorResult {
         val messages = conversationMessages.toMutableList()
+
+        // ── Extract and strip image data from messages ──
+        // Images are large base64 blobs that should not be sent in every API call.
+        // Save image data from the last user message, strip _images from all messages.
+        val lastUserIdx = messages.indexOfLast { it["role"] == "user" }
+        val savedImages = if (lastUserIdx >= 0) messages[lastUserIdx]["_images"] else null
+        for (i in messages.indices) {
+            if (messages[i].containsKey("_images")) {
+                messages[i] = messages[i].filterKeys { it != "_images" }.toMutableMap()
+            }
+        }
 
         // Assign a fresh workspace ID; may be overridden by open_app_workspace tool
         toolExecutor.currentAppId = UUID.randomUUID().toString()
@@ -49,18 +64,47 @@ class AgentOrchestrator(
         var latestThinking = ""
 
         // ── Intent classification via AI ──
+        onStep(AgentStep(StepType.THINKING, "正在分析请求..."))
         val userMessage = messages.lastOrNull { it["role"] == "user" }?.get("content") ?: ""
         val hasActiveWorkspace = toolExecutor.latestAppHint != null
-        val intent = IntentClassifier.classify(userMessage, hasActiveWorkspace, skill, aiService)
+        val intent = try {
+            IntentClassifier.classify(userMessage, hasActiveWorkspace, skill, aiService)
+        } catch (_: Exception) {
+            UserIntent.CONVERSATION
+        }
         onStep(AgentStep(StepType.THINKING, "意图识别: $intent"))
 
+        // ── Resolve injected skill prompts for this intent ──
+        // Cap total injected prompt size to 4KB to prevent context overflow
+        val rawInjected = injectionSkills
+            .filter { it.id != skill.id && intent in it.intentInjections }
+        val injectedPrompts = mutableListOf<String>()
+        var injectedSize = 0
+        for (s in rawInjected) {
+            if (injectedSize + s.systemPrompt.length > 4096) break
+            injectedPrompts.add(s.systemPrompt)
+            injectedSize += s.systemPrompt.length
+        }
+
         // ── Phase 1: Planning ──
-        val planningSnapshot = if (skill.mode == SkillMode.CHAT) buildMemorySnapshot() else null
-        val planningPrompt = PromptAssembler.build(skill, intent, AgentPhase.PLANNING, toolExecutor.toolDefs, planningSnapshot)
+        // Pre-load memory for CHAT mode, or for app intents (user preferences affect app design)
+        val planningSnapshot = if (skill.mode == SkillMode.CHAT || intent.needsApp()) buildMemorySnapshot() else null
+        val workspaceSnapshot = buildWorkspaceSnapshot()
+        val planningPrompt = PromptAssembler.build(skill, intent, AgentPhase.PLANNING, toolExecutor.toolDefs, planningSnapshot, workspaceSnapshot = workspaceSnapshot, injectedPrompts = injectedPrompts)
 
         val systemIndex = messages.indexOfFirst { it["role"] == "system" }
         if (systemIndex >= 0) {
             messages[systemIndex] = mapOf("role" to "system", "content" to planningPrompt)
+        }
+
+        // Track AI's capability selection from planning
+        var aiSelection: PromptAssembler.CapabilitySelection? = null
+
+        // Re-inject images into last user message so the first planning call can see them
+        if (savedImages != null && lastUserIdx >= 0) {
+            val msg = messages[lastUserIdx].toMutableMap()
+            msg["_images"] = savedImages
+            messages[lastUserIdx] = msg
         }
 
         // ── Phase 1: Planning + Tool Use ──
@@ -70,19 +114,27 @@ class AgentOrchestrator(
             onStep(AgentStep(StepType.THINKING, "正在规划...", "第 $toolIterations 轮"))
 
             // Use larger token budget when file tools are in play (replace_in_file needs space)
+            // Planning phase never uses deep thinking — it's just capability selection
             val planningBudget = if (usedFileTools) GENERATION_TOKENS else PLANNING_TOKENS
-            val chatResp = aiService.chatFull(messages, maxTokens = planningBudget, enableThinking = enableThinking)
+            val chatResp = callAi(messages, planningBudget, false, "Planning", onStep, onStepSync)
+
+            // Strip images after first planning call — they've been sent once, no need to resend
+            if (toolIterations == 1 && savedImages != null && lastUserIdx >= 0 && messages[lastUserIdx].containsKey("_images")) {
+                messages[lastUserIdx] = messages[lastUserIdx].filterKeys { it != "_images" }.toMutableMap()
+            }
+
             val response = chatResp.content
-            if (chatResp.thinkingContent.isNotBlank()) latestThinking = chatResp.thinkingContent
             val toolCalls = ToolCall.parseAll(response)
 
             // Detect truncated tool call (output cut off mid-JSON)
             if (toolCalls.isEmpty() && ToolCall.hasTruncatedToolCall(response)) {
                 // Retry with full token budget
                 onStep(AgentStep(StepType.THINKING, "工具调用被截断，重试...", "增加token"))
-                val retryResp = aiService.chatFull(messages, maxTokens = GENERATION_TOKENS, enableThinking = enableThinking)
+                val retryResp = callAi(messages, GENERATION_TOKENS, false, "Planning重试", onStep, onStepSync)
                 val retryResponse = retryResp.content
-                if (retryResp.thinkingContent.isNotBlank()) latestThinking = retryResp.thinkingContent
+                if (retryResp.thinkingContent.isNotBlank()) {
+                    latestThinking = retryResp.thinkingContent
+                }
                 val retryToolCalls = ToolCall.parseAll(retryResponse)
                 if (retryToolCalls.isNotEmpty()) {
                     // Process the retried tool calls
@@ -109,23 +161,40 @@ class AgentOrchestrator(
             if (toolCalls.isEmpty()) {
                 // AI decided no more tools needed — check if workspace was already built
                 if (usedFileTools) {
-                    val wsApp = buildWorkspaceApp(toolExecutor.currentAppId, response)
+                    // Run self-check before early return (don't skip validation)
+                    val earlyPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, buildWorkspaceSnapshot(), injectedPrompts)
+                    val wsApp = runPostGenerationCheck(messages, toolExecutor.currentAppId, earlyPrompt, onStep, onStepSync)
                     if (wsApp != null) {
                         onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                         return cleanResult(response, wsApp, toolIterations, latestThinking)
                     }
                 }
-                // Check if this is already a final response with HTML
-                val miniApp = MiniAppParser.extractMiniApp(response)
-                if (miniApp != null) {
-                    onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
-                    return cleanResult(response, miniApp, toolIterations, latestThinking)
+                // For non-app intents (CONVERSATION etc.), check if AI already produced HTML
+                // For app intents (CREATE_APP, MODIFY_APP), always proceed to Generation phase
+                if (!intent.needsApp()) {
+                    val miniApp = MiniAppParser.extractMiniApp(response)
+                    if (miniApp != null) {
+                        onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
+                        return cleanResult(response, miniApp, toolIterations, latestThinking)
+                    }
                 }
-                // No HTML and no tool calls at planning stage — move to generation phase
+                // Move to generation phase (or return text for non-app intents)
                 val stripped = ToolCall.stripToolCalls(response)
                 if (stripped.isNotBlank()) {
                     onStep(AgentStep(StepType.THINKING, stripped.take(200)))
                     messages.add(mapOf("role" to "assistant", "content" to response))
+                }
+                // Parse AI's capability selection and clean it from context
+                if (intent.needsApp()) {
+                    aiSelection = PromptAssembler.parseCapabilitySelection(response)
+                    // Strip <capability_selection> block from messages to avoid confusing Generation
+                    val lastAssistantIdx = messages.indexOfLast { it["role"] == "assistant" }
+                    if (lastAssistantIdx >= 0) {
+                        val cleaned = messages[lastAssistantIdx]["content"]!!
+                            .replace(Regex("<capability_selection>[\\s\\S]*?</capability_selection>"), "")
+                            .trim()
+                        messages[lastAssistantIdx] = mapOf("role" to "assistant", "content" to cleaned)
+                    }
                 }
                 break
             }
@@ -158,25 +227,34 @@ class AgentOrchestrator(
             }
             // When a tool fails, add recovery guidance
             if (hasFailure) {
-                resultParts.appendLine("\n[System] A tool call failed. Read the error message carefully. Fix the parameters and retry. Remember: open_app_workspace requires app_id with an actual UUID value from list_saved_apps.")
+                resultParts.appendLine("\n[系统] 工具调用失败。请仔细阅读错误信息，修正参数后重试。注意：open_app_workspace 的 app_id 必须是 list_saved_apps 返回的实际 UUID 值。")
             }
             messages.add(mapOf("role" to "user", "content" to resultParts.toString()))
         }
 
-        // If all work was done via file tools, check workspace
+        // If all work was done via file tools, run self-check then return
         if (usedFileTools) {
-            val wsApp = buildWorkspaceApp(toolExecutor.currentAppId, "")
+            val earlyGenPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, buildWorkspaceSnapshot(), injectedPrompts)
+            val wsApp = runPostGenerationCheck(messages, toolExecutor.currentAppId, earlyGenPrompt, onStep, onStepSync)
             if (wsApp != null) {
                 onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                 return cleanResult(messages.lastOrNull { it["role"] == "assistant" }?.get("content") ?: "", wsApp, toolIterations, latestThinking)
             }
         }
 
-        // ── Phase 2: Generation (full token budget) ──
+        // ── Non-app intents: return planning response directly (no Generation phase) ──
+        if (!intent.needsApp()) {
+            val lastResponse = messages.lastOrNull { it["role"] == "assistant" }?.get("content") ?: ""
+            onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
+            return cleanResult(lastResponse, MiniAppParser.extractMiniApp(lastResponse), toolIterations, latestThinking)
+        }
+
+        // ── Phase 2: Generation (full token budget) — only for app intents ──
         onStep(AgentStep(StepType.THINKING, "正在生成应用...", "全量生成"))
 
-        // Rebuild system prompt for GENERATION phase (more tools, Bridge/CDN docs)
-        val generationPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot)
+        // Rebuild system prompt for GENERATION phase with AI's capability selections
+        val genWorkspaceSnapshot = buildWorkspaceSnapshot()
+        val generationPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, genWorkspaceSnapshot, injectedPrompts)
 
         // Compress context
         val compressedMessages = compressContext(messages)
@@ -187,23 +265,34 @@ class AgentOrchestrator(
             compressedMessages[compSysIdx] = mapOf("role" to "system", "content" to generationPrompt)
         }
 
-        // Add generation instruction — adapted based on whether file tools are available
-        val genInstruction = if (usedFileTools) {
-            "Continue creating the application. You can use file tools (create_file, write_file, etc.) to write each file separately, or output a single HTML in ```html fences. If you use file tools, make sure index.html is the entry point. Generate COMPLETE code — never truncate."
-        } else {
-            "Now produce your complete final response. If generating an app, you can either:\n1. Output the FULL HTML code in ```html fences (single-file app)\n2. Use file tools (create_file) to create multiple files for complex apps (HTML, CSS, JS separately)\nDo NOT truncate or abbreviate any code. Output the complete application."
+        // Add generation instruction — references the plan from Planning phase
+        // Check intent BEFORE usedFileTools, so MODIFY_APP gets correct instruction even when file tools were used in planning
+        val genInstruction = when {
+            intent == UserIntent.MODIFY_APP -> "根据上方的规划，现在对现有应用应用所有修改。必须先 read_workspace_file 读取当前代码（不要凭记忆），再用 replace_in_file 或 write_file 修改。修改完成后用 validate_html 检查。确保应用完整可运行。"
+            usedFileTools -> "根据上方的架构规划，继续创建应用。使用文件工具（create_file、write_file 等）分别写入每个文件。确保 index.html 为入口文件。生成完整代码——绝对不要截断。所有文件写入完成后，用 validate_html 验证 index.html。"
+            else -> "根据上方的架构规划，现在生成完整应用。输出方式：\n1. 单文件：在 ```html 代码块中输出完整 HTML 代码\n2. 多文件：使用文件工具（create_file）分别创建 HTML、CSS、JS 文件\n生成完整、可运行的代码。绝对不要截断或省略。"
         }
-        compressedMessages.add(mapOf("role" to "user", "content" to genInstruction))
+        val genInstructionMsg = if (savedImages != null) {
+            mutableMapOf("role" to "user", "content" to genInstruction, "_images" to savedImages)
+        } else {
+            mutableMapOf("role" to "user", "content" to genInstruction)
+        }
+        compressedMessages.add(genInstructionMsg)
 
-        val genResp = aiService.chatFull(compressedMessages, maxTokens = GENERATION_TOKENS, enableThinking = enableThinking)
+        val genResp = callAi(compressedMessages, GENERATION_TOKENS, enableThinking, "Generation", onStep, onStepSync)
         val genResponse = genResp.content
-        if (genResp.thinkingContent.isNotBlank()) latestThinking = genResp.thinkingContent
+        if (genResp.thinkingContent.isNotBlank()) {
+            latestThinking = genResp.thinkingContent
+            onStep(AgentStep(StepType.THINKING, "💡 Generation 思考完成", genResp.thinkingContent))
+        }
 
         // Check if generation phase used file tools
         val genToolCalls = ToolCall.parseAll(genResponse)
         if (genToolCalls.isNotEmpty()) {
+            // Use compressed messages for generation continuation to avoid token waste
+            val genMessages = compressedMessages.toMutableList()
             // Process tool calls from generation phase
-            messages.add(mapOf("role" to "assistant", "content" to genResponse))
+            genMessages.add(mapOf("role" to "assistant", "content" to genResponse))
             val resultParts = StringBuilder()
             for (call in genToolCalls) {
                 if (call.toolName in FILE_TOOLS) usedFileTools = true
@@ -219,18 +308,20 @@ class AgentOrchestrator(
             }
 
             // Continue iterating if more tool calls are expected
-            messages.add(mapOf("role" to "user", "content" to resultParts.toString()))
+            genMessages.add(mapOf("role" to "user", "content" to resultParts.toString()))
             var extraIterations = 0
             while (extraIterations < MAX_TOOL_ITERATIONS) {
                 extraIterations++
-                val contResp = aiService.chatFull(messages, maxTokens = GENERATION_TOKENS, enableThinking = enableThinking)
+                val contResp = callAi(genMessages, GENERATION_TOKENS, enableThinking, "Generation继续", onStep, onStepSync)
                 val contResponse = contResp.content
-                if (contResp.thinkingContent.isNotBlank()) latestThinking = contResp.thinkingContent
+                if (contResp.thinkingContent.isNotBlank()) {
+                    latestThinking = contResp.thinkingContent
+                }
                 val contToolCalls = ToolCall.parseAll(contResponse)
                 if (contToolCalls.isEmpty()) {
-                    // Done
+                    // Done — run self-check before returning
                     if (usedFileTools) {
-                        val wsApp = buildWorkspaceApp(toolExecutor.currentAppId, contResponse)
+                        val wsApp = runPostGenerationCheck(genMessages, toolExecutor.currentAppId, generationPrompt, onStep, onStepSync)
                         if (wsApp != null) {
                             onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                             return cleanResult(contResponse, wsApp, toolIterations + extraIterations, latestThinking)
@@ -243,7 +334,7 @@ class AgentOrchestrator(
                     }
                     break
                 }
-                messages.add(mapOf("role" to "assistant", "content" to contResponse))
+                genMessages.add(mapOf("role" to "assistant", "content" to contResponse))
                 val contResults = StringBuilder()
                 for (call in contToolCalls) {
                     if (call.toolName in FILE_TOOLS) usedFileTools = true
@@ -257,12 +348,12 @@ class AgentOrchestrator(
                     contResults.appendLine(result.result)
                     contResults.appendLine("</tool_result>")
                 }
-                messages.add(mapOf("role" to "user", "content" to contResults.toString()))
+                genMessages.add(mapOf("role" to "user", "content" to contResults.toString()))
             }
 
-            // Final check for workspace app
+            // Final check for workspace app — run self-check before returning
             if (usedFileTools) {
-                val wsApp = buildWorkspaceApp(toolExecutor.currentAppId, "")
+                val wsApp = runPostGenerationCheck(genMessages, toolExecutor.currentAppId, generationPrompt, onStep, onStepSync)
                 if (wsApp != null) {
                     onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                     return cleanResult(genResponse, wsApp, toolIterations, latestThinking)
@@ -289,7 +380,7 @@ class AgentOrchestrator(
                 compressedMessages.first(),
                 mapOf("role" to "assistant", "content" to genResponse),
                 mapOf("role" to "user", "content" to
-                    "Your previous response was truncated. Continue EXACTLY from where you left off. Do NOT repeat any code already written. Just output the remaining code, ending with \n``` to close the code block.")
+                    "你上次的回复被截断了。请从上次中断的地方精确继续。不要重复已写的代码。只输出剩余代码，以 \n``` 结尾来关闭代码块。")
             )
 
             val continuation = aiService.chat(continueMessages, maxTokens = GENERATION_TOKENS, enableThinking = false)
@@ -315,6 +406,96 @@ class AgentOrchestrator(
     /** Strip <tool_call> tags from response before returning to UI. */
     private fun cleanResult(response: String, miniApp: MiniApp?, steps: Int, thinking: String = ""): OrchestratorResult {
         return OrchestratorResult(ToolCall.stripToolCalls(response), miniApp, steps, thinking)
+    }
+
+    /**
+     * Post-generation self-check: validate HTML + collect runtime errors.
+     * If issues found, inject them and let AI fix in one more iteration.
+     * Returns the (possibly updated) workspace app.
+     */
+    private suspend fun runPostGenerationCheck(
+        messages: MutableList<Map<String, String>>,
+        appId: String,
+        generationPrompt: String,
+        onStep: suspend (AgentStep) -> Unit,
+        onStepSync: ((AgentStep) -> Unit)?
+    ): MiniApp? {
+        val wm = toolExecutor.workspaceManager
+        if (!wm.hasFiles(appId)) return null
+
+        onStep(AgentStep(StepType.THINKING, "正在自检...", "验证HTML + 运行时错误"))
+
+        // 1. Validate HTML — find entry file (index.html or first .html file)
+        val allFiles = wm.getAllFiles(appId)
+        val entryFile = if ("index.html" in allFiles) {
+            "index.html"
+        } else {
+            allFiles.firstOrNull { it.endsWith(".html") }
+        }
+        val validationResult = if (entryFile != null) wm.validateHtml(appId, entryFile) else null
+        val hasValidationIssues = validationResult != null && !validationResult.startsWith("✓")
+
+        // 2. Collect runtime errors
+        val runtimeErrors = RuntimeErrorCollector.getErrors(appId)
+        val hasRuntimeErrors = runtimeErrors.isNotEmpty()
+        if (hasRuntimeErrors) RuntimeErrorCollector.clear(appId)
+
+        if (!hasValidationIssues && !hasRuntimeErrors) {
+            onStep(AgentStep(StepType.THINKING, "✓ 自检通过", "无问题"))
+            return buildWorkspaceApp(appId, "")
+        }
+
+        // Build fix instruction
+        val fixParts = StringBuilder("自检发现以下问题，请修复：\n\n")
+        if (hasValidationIssues) {
+            fixParts.appendLine("**HTML 校验结果：**")
+            fixParts.appendLine(validationResult)
+            fixParts.appendLine()
+        }
+        if (hasRuntimeErrors) {
+            fixParts.appendLine("**JS 运行时错误：**")
+            runtimeErrors.forEachIndexed { i, e -> fixParts.appendLine("${i + 1}. $e") }
+            fixParts.appendLine()
+        }
+        fixParts.appendLine("请先 read_workspace_file 读取相关文件，然后修复上述问题。修复后用 validate_html 再次验证。")
+
+        onStep(AgentStep(StepType.THINKING, "发现问题，自动修复中...", fixParts.toString().take(200)))
+
+        // Compress and let AI fix
+        val fixMessages = compressContext(messages)
+        val fixSysIdx = fixMessages.indexOfFirst { it["role"] == "system" }
+        if (fixSysIdx >= 0) {
+            fixMessages[fixSysIdx] = mapOf("role" to "system", "content" to generationPrompt)
+        }
+        fixMessages.add(mapOf("role" to "user", "content" to fixParts.toString()))
+
+        // Give AI up to 5 rounds to fix
+        var fixIterations = 0
+        while (fixIterations < 5) {
+            fixIterations++
+            val fixResp = callAi(fixMessages, GENERATION_TOKENS, false, "自检修复", onStep, onStepSync)
+            val fixResponse = fixResp.content
+            val fixToolCalls = ToolCall.parseAll(fixResponse)
+
+            if (fixToolCalls.isEmpty()) break // AI done fixing
+
+            fixMessages.add(mapOf("role" to "assistant", "content" to fixResponse))
+            val resultParts = StringBuilder()
+            for (call in fixToolCalls) {
+                val result = toolExecutor.execute(call)
+                onStep(AgentStep(StepType.TOOL_CALL, "修复: ${call.toolName}",
+                    call.arguments.entries.joinToString(", ") { "${it.key}=${it.value.take(80)}" }))
+                onStep(AgentStep(StepType.TOOL_RESULT,
+                    if (result.success) "✓ ${call.toolName}" else "✗ ${call.toolName}",
+                    result.result.take(200)))
+                resultParts.appendLine("<tool_result name=\"${call.toolName}\" success=\"${result.success}\">")
+                resultParts.appendLine(result.result)
+                resultParts.appendLine("</tool_result>")
+            }
+            fixMessages.add(mapOf("role" to "user", "content" to resultParts.toString()))
+        }
+
+        return buildWorkspaceApp(appId, "")
     }
 
     /**
@@ -377,7 +558,7 @@ class AgentOrchestrator(
             } else if (role == "assistant" && content.contains("<tool_call>")) {
                 // Keep only the reasoning text, strip tool call blocks
                 val stripped = ToolCall.stripToolCalls(content)
-                compressed.add(mapOf("role" to role, "content" to stripped.ifBlank { "(tool calls executed)" }))
+                compressed.add(mapOf("role" to role, "content" to stripped.ifBlank { "(工具调用已执行)" }))
             } else {
                 compressed.add(msg)
             }
@@ -386,19 +567,82 @@ class AgentOrchestrator(
     }
 
     private fun summarizeToolResults(content: String): String {
-        val regex = Regex("<tool_result name=\"(.*?)\"[^>]*>([\\s\\S]*?)</tool_result>")
+        val regex = Regex("<tool_result name=\"(.*?)\"[^>]*success=\"(.*?)\"[^>]*>([\\s\\S]*?)</tool_result>")
         val summaries = regex.findAll(content).map { match ->
             val name = match.groupValues[1]
-            val result = match.groupValues[2].trim()
-            val short = if (result.length > 300) result.take(300) + "..." else result
-            "[$name]: $short"
+            val success = match.groupValues[2]
+            val result = match.groupValues[3].trim()
+            // 文件写入类工具只保留成功/失败状态，不保留完整内容
+            val short = when {
+                name in FILE_TOOLS && success == "true" -> "成功"
+                name == "list_workspace_files" || name == "list_saved_apps" -> {
+                    if (result.length > 200) result.take(200) + "..." else result
+                }
+                result.length > 300 -> result.take(300) + "..."
+                else -> result
+            }
+            "[$name=$success]: $short"
         }.toList()
 
+        // 如果新正则没匹配到，用旧格式兼容
+        if (summaries.isEmpty()) {
+            val fallback = Regex("<tool_result name=\"(.*?)\"[^>]*>([\\s\\S]*?)</tool_result>")
+            val fallbackSummaries = fallback.findAll(content).map { match ->
+                val name = match.groupValues[1]
+                val result = match.groupValues[2].trim()
+                val short = if (result.length > 300) result.take(300) + "..." else result
+                "[$name]: $short"
+            }.toList()
+            if (fallbackSummaries.isNotEmpty()) {
+                return "工具结果：\n" + fallbackSummaries.joinToString("\n")
+            }
+        }
+
         return if (summaries.isNotEmpty()) {
-            "Tool results:\n" + summaries.joinToString("\n")
+            "工具结果：\n" + summaries.joinToString("\n")
         } else {
             content.take(500)
         }
+    }
+
+    /** 构建当前工作区快照，注入到系统提示让 AI 感知工作区状态 */
+    private fun buildWorkspaceSnapshot(): String {
+        val appId = toolExecutor.currentAppId
+        val hasFiles = toolExecutor.workspaceManager.hasFiles(appId)
+        val savedApps = toolExecutor.miniAppStorage.loadAll()
+        val existingApp = savedApps.find { it.id == appId }
+
+        // 检查 latestAppHint 指向的上一轮应用（用户可能要修改它）
+        val hintId = toolExecutor.latestAppHint
+        val hintApp = if (hintId != null && hintId != appId) savedApps.find { it.id == hintId } else null
+        val hintHasFiles = hintId != null && hintId != appId && toolExecutor.workspaceManager.hasFiles(hintId)
+
+        return buildString {
+            appendLine("### 当前工作区状态")
+            if (hasFiles) {
+                val files = toolExecutor.workspaceManager.listFiles(appId, "")
+                if (existingApp != null) {
+                    appendLine("应用: \"${existingApp.name}\" (app_id=${appId}, 已保存)")
+                } else {
+                    appendLine("应用: 未保存的新应用 (当前会话中创建)")
+                }
+                appendLine("文件列表:")
+                appendLine(files)
+            } else if (hintHasFiles) {
+                // 当前工作区为空但有上一轮的应用提示
+                val hintFiles = toolExecutor.workspaceManager.listFiles(hintId!!, "")
+                appendLine("当前工作区为空（新轮次）")
+                appendLine("上一轮操作的应用: \"${hintApp?.name ?: "未知"}\" (app_id=${hintId})")
+                appendLine("该应用文件列表:")
+                appendLine(hintFiles)
+                appendLine("如需修改该应用，请使用 open_app_workspace(app_id=\"$hintId\")")
+            } else {
+                appendLine("当前工作区为空（新会话）")
+            }
+            if (savedApps.isNotEmpty()) {
+                appendLine("已保存的应用: ${savedApps.joinToString(", ") { "\"${it.name}\"(${it.id})" }}")
+            }
+        }.trimEnd()
     }
 
     /**
@@ -430,6 +674,33 @@ class AgentOrchestrator(
         "\n[已知记忆]\n${lines.joinToString("\n")}\n"
     }
 
+    /**
+     * Call AI with streaming for real-time UI feedback.
+     * When thinking is enabled, thinking tokens are streamed.
+     * Content tokens are always streamed so the user sees progress during long waits.
+     */
+    private suspend fun callAi(
+        messages: List<Map<String, String>>,
+        maxTokens: Int,
+        enableThinking: Boolean,
+        label: String,
+        onStep: suspend (AgentStep) -> Unit,
+        onStepSync: ((AgentStep) -> Unit)?
+    ): ChatResponse {
+        val thinkingLabel = "💡 $label 思考中..."
+        return aiService.chatStream(
+            messages = messages,
+            maxTokens = maxTokens,
+            enableThinking = enableThinking,
+            onThinkingDelta = { accumulated ->
+                // Called from IO thread — use sync callback for real-time UI update
+                onStepSync?.invoke(AgentStep(StepType.THINKING, thinkingLabel, accumulated))
+            },
+            onContentDelta = { accumulated ->
+                onStepSync?.invoke(AgentStep(StepType.THINKING, "$label...", accumulated.takeLast(200)))
+            }
+        )
+    }
 
 }
 

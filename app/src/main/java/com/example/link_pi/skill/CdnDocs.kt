@@ -41,11 +41,11 @@ object CdnDocs {
         if (groups.isEmpty()) return ""
         val libs = groups.mapNotNull { GROUP_MAP[it] }.joinToString("\n")
         return """
-### CDN Libraries (China-accessible — do NOT use unpkg/jsdelivr)
+### CDN 库（国内可访问——不要使用 unpkg/jsdelivr）
 
 $libs
-Always add onerror fallback for CDN scripts: <script src="cdn_url" onerror="document.title='CDN加载失败:'+this.src"></script>
-Use v-cloak with [v-cloak]{display:none} to hide Vue template syntax before initialization.
+始终为 CDN 脚本添加 onerror 回退：<script src="cdn_url" onerror="document.title='CDN加载失败:'+this.src"></script>
+使用 Vue 时添加 v-cloak 和 [v-cloak]{display:none}，防止初始化前显示模板语法。
 """.trimIndent()
     }
 }

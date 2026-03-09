@@ -1,21 +1,43 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ── LinkPi ProGuard / R8 Rules ──
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep line numbers for crash reports
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# ── Data classes used in JSON serialization (org.json) ──
+-keep class com.example.link_pi.data.model.** { *; }
+-keep class com.example.link_pi.agent.ModuleStorage$Module { *; }
+-keep class com.example.link_pi.agent.ModuleStorage$Endpoint { *; }
+-keep class com.example.link_pi.share.ReceivedItem { *; }
+-keep class com.example.link_pi.share.ConnectionState$* { *; }
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# ── Enums resolved by valueOf() during deserialization ──
+-keepclassmembers enum com.example.link_pi.skill.BridgeGroup { *; }
+-keepclassmembers enum com.example.link_pi.skill.CdnGroup { *; }
+-keepclassmembers enum com.example.link_pi.skill.ToolGroup { *; }
+-keepclassmembers enum com.example.link_pi.skill.UserIntent { *; }
+-keepclassmembers enum com.example.link_pi.data.model.SkillMode { *; }
+
+# ── OkHttp ──
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
+
+# ── Google Tink / errorprone annotations ──
+-dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
+-dontwarn com.google.errorprone.annotations.CheckReturnValue
+-dontwarn com.google.errorprone.annotations.Immutable
+-dontwarn com.google.errorprone.annotations.RestrictedApi
+
+# ── Kotlin coroutines ──
+-dontwarn kotlinx.coroutines.**
+-keep class kotlinx.coroutines.** { *; }
+
+# ── Compose ──
+-dontwarn androidx.compose.**
+
+# ── WebView JavaScript interface ──
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}

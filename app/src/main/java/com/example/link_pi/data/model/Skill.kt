@@ -3,6 +3,7 @@ package com.example.link_pi.data.model
 import com.example.link_pi.skill.BridgeGroup
 import com.example.link_pi.skill.CdnGroup
 import com.example.link_pi.skill.ToolGroup
+import com.example.link_pi.skill.UserIntent
 
 /**
  * Knowledge injection mode — controls what context is injected into the AI prompt.
@@ -35,5 +36,7 @@ data class Skill(
     /** CDN library groups to inject when generating apps. */
     val cdnGroups: Set<CdnGroup> = emptySet(),
     /** Extra tool groups beyond the Intent×Phase default. */
-    val extraToolGroups: Set<ToolGroup> = emptySet()
+    val extraToolGroups: Set<ToolGroup> = emptySet(),
+    /** 意图注入：当分类到这些意图时，自动注入此 Skill 的 systemPrompt。仅自定义 Skill 可配置。 */
+    val intentInjections: Set<UserIntent> = emptySet()
 )

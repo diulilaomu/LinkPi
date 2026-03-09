@@ -161,6 +161,7 @@ fun MiniAppWebView(
                     (function(){
                         var errBox = null;
                         function showErr(msg) {
+                            if(window.NativeBridge&&window.NativeBridge.reportError){try{NativeBridge.reportError(msg);}catch(e){}}
                             if (!errBox) {
                                 errBox = document.createElement('div');
                                 errBox.id = '_err_overlay';
@@ -249,8 +250,8 @@ fun WorkspaceMiniAppWebView(
         WebView(context).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
-                settings.allowContentAccess = true
-                settings.allowFileAccess = true
+                settings.allowContentAccess = false
+                settings.allowFileAccess = false
                 settings.mediaPlaybackRequiresUserGesture = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 settings.loadWithOverviewMode = true
@@ -318,6 +319,7 @@ fun WorkspaceMiniAppWebView(
                     (function(){
                         var errBox = null;
                         function showErr(msg) {
+                            if(window.NativeBridge&&window.NativeBridge.reportError){try{NativeBridge.reportError(msg);}catch(e){}}
                             if (!errBox) {
                                 errBox = document.createElement('div');
                                 errBox.id = '_err_overlay';

@@ -33,6 +33,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -76,6 +77,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -93,14 +95,20 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Refresh
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.link_pi.agent.AgentStep
 import com.example.link_pi.agent.StepType
+import com.example.link_pi.data.model.Attachment
 import com.example.link_pi.data.model.ChatMessage
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppParser
 import com.example.link_pi.ui.miniapp.exportMiniApp
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 
 @Composable
 fun ChatScreen(
@@ -114,8 +122,19 @@ fun ChatScreen(
     val agentSteps by viewModel.agentSteps.collectAsState()
     val activeSkill by viewModel.activeSkill.collectAsState()
     val deepThinking by viewModel.deepThinking.collectAsState()
+    val models by viewModel.models.collectAsState()
+    val activeModelId by viewModel.activeModelId.collectAsState()
+    var showModelMenu by remember { mutableStateOf(false) }
+    val activeModel = models.firstOrNull { it.id == activeModelId } ?: models.firstOrNull()
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val pendingAttachments by viewModel.pendingAttachments.collectAsState()
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.addAttachment(it) }
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -138,6 +157,13 @@ fun ChatScreen(
     }
     // Take the larger of IME or nav bar, avoid double padding
     val bottomPadding = maxOf(imeBottomDp, navBarBottomDp)
+
+    // 键盘弹起时自动滚动到底部，避免输入区域遮挡消息
+    LaunchedEffect(imeBottomDp) {
+        if (imeBottomDp > navBarBottomDp && listState.layoutInfo.totalItemsCount > 0) {
+            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -206,6 +232,107 @@ fun ChatScreen(
             tonalElevation = 0.dp
         ) {
             Column {
+                // Model selector list (expands inside the card)
+                AnimatedVisibility(
+                    visible = showModelMenu,
+                    enter = expandVertically(),
+                    exit = shrinkVertically()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 8.dp)
+                    ) {
+                        models.forEach { model ->
+                            val isActive = model.id == activeModelId
+                            Surface(
+                                onClick = {
+                                    viewModel.switchModel(model.id)
+                                    showModelMenu = false
+                                },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isActive)
+                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                else
+                                    Color.Transparent
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = model.name.ifBlank { model.model },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (isActive)
+                                            MaterialTheme.colorScheme.primary
+                                        else
+                                            MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (isActive) {
+                                        Icon(
+                                            Icons.Filled.Check,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+
+                // Attachment chips (above text input)
+                if (pendingAttachments.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 8.dp, end = 8.dp, top = 4.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        pendingAttachments.forEachIndexed { index, att ->
+                            val label = "附件${index + 1}:${if (att.base64Data != null) "图片" else "文本"}"
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        maxLines = 1
+                                    )
+                                    Surface(
+                                        onClick = { viewModel.removeAttachment(index) },
+                                        shape = CircleShape,
+                                        color = Color.Transparent
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Close,
+                                            contentDescription = "移除",
+                                            modifier = Modifier.size(14.dp).padding(1.dp),
+                                            tint = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.6f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Text input — borderless inside the card
                 OutlinedTextField(
                     value = inputText,
@@ -237,6 +364,49 @@ fun ChatScreen(
                         .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Model selector toggle
+                    Surface(
+                        onClick = { showModelMenu = !showModelMenu },
+                        shape = RoundedCornerShape(16.dp),
+                        color = if (showModelMenu)
+                            MaterialTheme.colorScheme.primaryContainer
+                        else
+                            Color.Transparent
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = activeModel?.name?.ifBlank { activeModel?.model ?: "模型" } ?: "模型",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (showModelMenu)
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 100.dp)
+                            )
+                            val arrowRotation by animateFloatAsState(
+                                targetValue = if (showModelMenu) 180f else 0f,
+                                label = "arrow"
+                            )
+                            Icon(
+                                Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .rotate(arrowRotation),
+                                tint = if (showModelMenu)
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
                     // Deep thinking toggle
                     Surface(
                         onClick = { viewModel.toggleDeepThinking() },
@@ -271,26 +441,39 @@ fun ChatScreen(
                         }
                     }
 
-                    // Skill badge
-                    Text(
-                        text = "  ${activeSkill.icon} ${activeSkill.name}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                    )
+                    // File attachment button
+                    Surface(
+                        onClick = {
+                            filePickerLauncher.launch(arrayOf(
+                                "text/plain", "text/markdown", "text/x-markdown",
+                                "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"
+                            ))
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        color = Color.Transparent
+                    ) {
+                        Icon(
+                            Icons.Outlined.AttachFile,
+                            contentDescription = "附件",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.weight(1f))
 
                     // Send button
+                    val canSend = (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading
                     Surface(
                         onClick = {
-                            if (inputText.isNotBlank() && !isLoading) {
+                            if (canSend) {
                                 viewModel.sendMessage(inputText)
                                 inputText = ""
                             }
                         },
-                        enabled = inputText.isNotBlank() && !isLoading,
+                        enabled = canSend,
                         shape = RoundedCornerShape(24.dp),
-                        color = if (inputText.isNotBlank() && !isLoading)
+                        color = if (canSend)
                             MaterialTheme.colorScheme.primary
                         else
                             MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
@@ -299,7 +482,7 @@ fun ChatScreen(
                             text = "发送",
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                             style = MaterialTheme.typography.labelMedium,
-                            color = if (inputText.isNotBlank() && !isLoading)
+                            color = if (canSend)
                                 MaterialTheme.colorScheme.onPrimary
                             else
                                 MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
@@ -333,7 +516,14 @@ private fun WelcomeCard() {
             contentDescription = "LinkPi Logo",
             modifier = Modifier.size(96.dp)
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = "欢迎使用灵枢",
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold
+        )
+        Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = "愿为AI应用探索的后行者",
             style = MaterialTheme.typography.bodyMedium,
@@ -359,12 +549,67 @@ private fun MessageBubble(
     var saved by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+    val avatarBitmap = remember {
+        val fileName = if (isUser) "user.png" else "ai.png"
+        context.assets.open(fileName).use {
+            android.graphics.BitmapFactory.decodeStream(it)
+        }
+    }
 
-    Column(
+    Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top
     ) {
+        if (!isUser) {
+            Image(
+                bitmap = avatarBitmap.asImageBitmap(),
+                contentDescription = "AI Avatar",
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
+
+        Column(
+            modifier = if (isUser) Modifier else Modifier.weight(1f),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
+        ) {
         if (isUser) {
+            // Image attachments — each in its own bubble
+            val imageAttachments = message.attachments.filter { it.base64Data != null }
+            val textAttachments = message.attachments.filter { it.base64Data == null }
+
+            imageAttachments.forEachIndexed { index, att ->
+                val b64 = att.base64Data!!.substringAfter("base64,")
+                val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                val bmp = remember(att.name) {
+                    android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }
+                if (bmp != null) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color.Transparent,
+                        modifier = Modifier.widthIn(max = 220.dp)
+                    ) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "附件${index + 1}:图片",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(14.dp)),
+                            contentScale = ContentScale.FillWidth
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+            }
+
+            // Text bubble (text attachments labels + message content)
+            if (textAttachments.isNotEmpty() || message.content.isNotBlank()) {
             Box {
                 Surface(
                     shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
@@ -376,12 +621,27 @@ private fun MessageBubble(
                             onLongClick = { showMenu = true }
                         )
                 ) {
-                    Text(
-                        text = message.content,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        if (textAttachments.isNotEmpty()) {
+                            textAttachments.forEachIndexed { index, att ->
+                                Text(
+                                    text = "📄 附件${index + 1}:文本",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.8f)
+                                )
+                            }
+                            if (message.content.isNotBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                            }
+                        }
+                        if (message.content.isNotBlank()) {
+                            Text(
+                                text = message.content,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
                 }
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                     DropdownMenuItem(
@@ -396,6 +656,7 @@ private fun MessageBubble(
                         onClick = { showMenu = false; onDelete() }
                     )
                 }
+            }
             }
         } else {
             // Agent steps (collapsed)
@@ -419,7 +680,6 @@ private fun MessageBubble(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(end = 24.dp)
                         .combinedClickable(
                             onClick = {},
                             onLongClick = { showMenu = true }
@@ -516,6 +776,19 @@ private fun MessageBubble(
                     }
                 }
             }
+        }
+        }
+
+        if (isUser) {
+            Spacer(modifier = Modifier.width(8.dp))
+            Image(
+                bitmap = avatarBitmap.asImageBitmap(),
+                contentDescription = "User Avatar",
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
         }
     }
 }
@@ -1141,6 +1414,9 @@ private fun AgentStepRow(step: AgentStep, isLast: Boolean) {
         StepType.TOOL_RESULT -> MaterialTheme.colorScheme.secondary
         StepType.FINAL_RESPONSE -> MaterialTheme.colorScheme.primary
     }
+    val isLongDetail = step.detail.length > 100
+    var expanded by remember { mutableStateOf(false) }
+    val clipboardManager = LocalClipboardManager.current
 
     Row(modifier = Modifier.padding(vertical = 2.dp)) {
         Column(
@@ -1157,28 +1433,104 @@ private fun AgentStepRow(step: AgentStep, isLast: Boolean) {
                 Box(
                     modifier = Modifier
                         .width(1.dp)
-                        .height(24.dp)
+                        .height(if (expanded) 200.dp else 24.dp)
                         .background(accentColor.copy(alpha = 0.2f))
                 )
             }
         }
 
-        Column(modifier = Modifier.padding(start = 4.dp)) {
-            Text(
-                text = step.description,
-                style = MaterialTheme.typography.labelSmall,
-                color = accentColor,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (step.detail.isNotBlank()) {
+        Column(modifier = Modifier.padding(start = 4.dp).fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = step.detail,
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                    text = step.description,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = accentColor,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
                 )
+                if (isLongDetail) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Surface(
+                        onClick = { expanded = !expanded },
+                        shape = RoundedCornerShape(4.dp),
+                        color = accentColor.copy(alpha = 0.1f)
+                    ) {
+                        Text(
+                            text = if (expanded) "收起 ▲" else "${step.detail.length}字 ▼",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                            color = accentColor.copy(alpha = 0.6f),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        )
+                    }
+                }
+            }
+            if (step.detail.isNotBlank()) {
+                if (!isLongDetail) {
+                    // Short detail: show inline
+                    Text(
+                        text = step.detail,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (!expanded) {
+                    // Long detail collapsed: show preview
+                    Text(
+                        text = step.detail.take(80) + "...",
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    // Long detail expanded: full text + copy button
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Surface(
+                        onClick = { clipboardManager.setText(AnnotatedString(step.detail)) },
+                        shape = RoundedCornerShape(4.dp),
+                        color = accentColor.copy(alpha = 0.1f)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.ContentCopy,
+                                contentDescription = "复制",
+                                modifier = Modifier.size(10.dp),
+                                tint = accentColor
+                            )
+                            Spacer(modifier = Modifier.width(3.dp))
+                            Text(
+                                text = "复制全文",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                color = accentColor
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 300.dp)
+                            .background(
+                                MaterialTheme.colorScheme.surfaceContainerLowest,
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(6.dp)
+                    ) {
+                        Text(
+                            text = step.detail,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                            )
+                        )
+                    }
+                }
             }
         }
     }
@@ -1269,6 +1621,12 @@ private fun LoadingIndicator() {
 
 @Composable
 private fun AgentStepsCard(steps: List<AgentStep>) {
+    val scrollState = rememberScrollState()
+
+    LaunchedEffect(steps.size) {
+        scrollState.animateScrollTo(scrollState.maxValue)
+    }
+
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow
@@ -1295,7 +1653,12 @@ private fun AgentStepsCard(steps: List<AgentStep>) {
                 modifier = Modifier.padding(vertical = 4.dp),
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
             )
-            Column(modifier = Modifier.animateContentSize()) {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 300.dp)
+                    .verticalScroll(scrollState)
+                    .animateContentSize()
+            ) {
                 steps.forEachIndexed { idx, step ->
                     AgentStepRow(step, isLast = idx == steps.size - 1)
                 }
