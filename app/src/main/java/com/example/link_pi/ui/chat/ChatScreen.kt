@@ -107,13 +107,15 @@ import com.example.link_pi.data.model.ChatMessage
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppParser
 import com.example.link_pi.ui.miniapp.exportMiniApp
+import com.example.link_pi.ui.workbench.AppCreationCard
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
-    onRunApp: (MiniApp) -> Unit
+    onRunApp: (MiniApp) -> Unit,
+    onNavigateWorkbench: (ChatViewModel.WorkbenchRequest) -> Unit = {}
 ) {
     val context = LocalContext.current
     val messages by viewModel.messages.collectAsState()
@@ -129,6 +131,7 @@ fun ChatScreen(
     var inputText by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val pendingAttachments by viewModel.pendingAttachments.collectAsState()
+    val pendingWorkbench by viewModel.pendingWorkbench.collectAsState()
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -199,6 +202,22 @@ fun ChatScreen(
                     onDelete = { viewModel.deleteMessage(message.id) },
                     onRegenerate = { viewModel.regenerateLastResponse() }
                 )
+            }
+            if (pendingWorkbench != null) {
+                item {
+                    AppCreationCard(
+                        title = pendingWorkbench!!.title,
+                        prompt = pendingWorkbench!!.userPrompt,
+                        onConfirm = {
+                            val req = viewModel.confirmWorkbench()
+                            if (req != null) onNavigateWorkbench(req)
+                        },
+                        onDismiss = {
+                            viewModel.dismissWorkbench()
+                            viewModel.launchOrchestratorPublic()
+                        }
+                    )
+                }
             }
             if (isLoading) {
                 if (agentSteps.isNotEmpty()) {

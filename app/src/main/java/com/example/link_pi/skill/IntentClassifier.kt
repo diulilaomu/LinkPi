@@ -77,7 +77,7 @@ object IntentClassifier {
 用户消息：$message
 类别："""
 
-    private fun classifyLocal(message: String, hasActiveWorkspace: Boolean): UserIntent {
+    fun classifyLocal(message: String, hasActiveWorkspace: Boolean): UserIntent {
         val lower = message.lowercase()
         return when {
             MEMORY_KEYWORDS.any { lower.contains(it) } -> UserIntent.MEMORY_OPS

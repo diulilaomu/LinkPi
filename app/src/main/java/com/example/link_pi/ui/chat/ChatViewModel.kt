@@ -22,7 +22,9 @@ import com.example.link_pi.network.AiConfig
 import com.example.link_pi.network.AiService
 import com.example.link_pi.network.ModelConfig
 import com.example.link_pi.skill.BuiltInSkills
+import com.example.link_pi.skill.IntentClassifier
 import com.example.link_pi.skill.SkillStorage
+import com.example.link_pi.skill.UserIntent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -79,6 +81,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     var currentMiniApp: MiniApp? = null
         private set
+
+    /** Pending workbench request — shown as a confirmation card in chat. */
+    data class WorkbenchRequest(
+        val userPrompt: String,
+        val title: String,
+        val modelId: String,
+        val enableThinking: Boolean
+    )
+
+    private val _pendingWorkbench = MutableStateFlow<WorkbenchRequest?>(null)
+    val pendingWorkbench: StateFlow<WorkbenchRequest?> = _pendingWorkbench.asStateFlow()
 
     init {
         // 启动时加载会话列表并恢复最近会话
@@ -250,6 +263,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        // Quick local intent check — redirect CREATE_APP to workbench confirmation
+        val hasActiveWorkspace = toolExecutor.latestAppHint != null || currentMiniApp != null
+        val localIntent = IntentClassifier.classifyLocal(userInput, hasActiveWorkspace)
+        if (localIntent == UserIntent.CREATE_APP) {
+            val title = userInput.take(30).replace("\n", " ").trim()
+            _pendingWorkbench.value = WorkbenchRequest(
+                userPrompt = userInput,
+                title = title,
+                modelId = aiConfig.activeModelId,
+                enableThinking = _deepThinking.value
+            )
+            // Add a system message to indicate the redirect
+            val hintMessage = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = "assistant",
+                content = "检测到应用创建请求，已准备工作台任务。请确认后开始生成。"
+            )
+            _messages.update { it + hintMessage }
+            saveCurrentConversation()
+            return
+        }
+
+        launchOrchestrator()
+    }
+
+    /** Dismiss the workbench confirmation card without acting. */
+    fun dismissWorkbench() {
+        _pendingWorkbench.value = null
+    }
+
+    /** Confirm the workbench request — returns the WorkbenchRequest for the caller to act on. */
+    fun confirmWorkbench(): WorkbenchRequest? {
+        val req = _pendingWorkbench.value
+        _pendingWorkbench.value = null
+        return req
+    }
+
+    /** Dismiss workbench card and run the normal orchestrator (called from UI). */
+    fun launchOrchestratorPublic() = launchOrchestrator()
+
+    private fun launchOrchestrator() {
         viewModelScope.launch {
             _isLoading.value = true
             try {
@@ -260,9 +314,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val lastApp = _messages.value.lastOrNull { it.miniApp != null }?.miniApp
                 toolExecutor.latestAppHint = lastApp?.id ?: currentMiniApp?.id
 
-                // Sync callback for real-time thinking updates from IO thread.
-                // Updates last step in-place if description matches (streaming thinking),
-                // otherwise appends a new step.
                 val syncStepCallback: (AgentStep) -> Unit = { step ->
                     synchronized(collectedSteps) {
                         val last = collectedSteps.lastOrNull()
@@ -299,10 +350,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _messages.update { it + assistantMessage }
                 _agentSteps.value = emptyList()
 
-                // Auto-save conversation
                 saveCurrentConversation()
 
-                // Async memory extraction — don't block the UI
+                val userInput = _messages.value.lastOrNull { it.role == "user" }?.content ?: ""
                 viewModelScope.launch {
                     try {
                         memoryExtractor.extract(userInput, result.finalResponse)

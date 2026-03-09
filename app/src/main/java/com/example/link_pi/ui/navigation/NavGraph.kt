@@ -76,10 +76,15 @@ import com.example.link_pi.ui.settings.ModuleScreen
 import com.example.link_pi.ui.settings.SettingsScreen
 import com.example.link_pi.ui.settings.ShareScreen
 import com.example.link_pi.ui.skill.SkillListScreen
+import com.example.link_pi.ui.workbench.WorkbenchDetailScreen
+import com.example.link_pi.ui.workbench.WorkbenchListScreen
+import com.example.link_pi.ui.workbench.WorkbenchViewModel
 
 sealed class Screen(val route: String, val title: String) {
     data object Chat : Screen("chat", "LinkPi")
     data object Apps : Screen("apps", "应用")
+    data object Workbench : Screen("workbench", "工作台")
+    data object WorkbenchDetail : Screen("workbench/detail", "任务详情")
     data object Settings : Screen("settings", "设置")
     data object MiniApp : Screen("miniapp", "运行应用")
     data object ModelManage : Screen("settings/models", "模型管理")
@@ -93,8 +98,10 @@ sealed class Screen(val route: String, val title: String) {
 @Composable
 fun LinkPiApp() {
     val chatViewModel: ChatViewModel = viewModel()
+    val workbenchViewModel: WorkbenchViewModel = viewModel()
     var currentPage by remember { mutableStateOf<String>(Screen.Chat.route) }
     var editModelId by remember { mutableStateOf("") }
+    var activeDetailTaskId by remember { mutableStateOf("") }
     var lastBackTime by remember { mutableLongStateOf(0L) }
     val context = LocalContext.current
     var showConversationList by remember { mutableStateOf(false) }
@@ -121,6 +128,7 @@ fun LinkPiApp() {
             Screen.ModuleSettings.route,
             Screen.ShareSettings.route -> currentPage = Screen.Settings.route
             Screen.ModelEdit("").route -> currentPage = Screen.ModelManage.route
+            Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
             else -> currentPage = Screen.Chat.route
         }
     }
@@ -224,12 +232,14 @@ fun LinkPiApp() {
                         Icon(Icons.Outlined.History, contentDescription = "会话历史")
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    IconButton(onClick = { currentPage = Screen.Apps.route }) {
-                        Icon(Icons.Outlined.GridView, contentDescription = "应用")
+                    IconButton(onClick = { currentPage = Screen.Workbench.route }) {
+                        Icon(Icons.Outlined.GridView, contentDescription = "工作台")
                     }
                 }
                 else -> {
                     val title = when (currentPage) {
+                        Screen.Workbench.route -> Screen.Workbench.title
+                        Screen.WorkbenchDetail.route -> Screen.WorkbenchDetail.title
                         Screen.Apps.route -> Screen.Apps.title
                         Screen.Settings.route -> Screen.Settings.title
                         Screen.ModelManage.route -> Screen.ModelManage.title
@@ -241,6 +251,7 @@ fun LinkPiApp() {
                         else -> ""
                     }
                     val backTarget = when (currentPage) {
+                        Screen.WorkbenchDetail.route -> Screen.Workbench.route
                         Screen.ModelManage.route,
                         Screen.SkillSettings.route,
                         Screen.MemorySettings.route,
@@ -269,8 +280,47 @@ fun LinkPiApp() {
                     onRunApp = { app ->
                         chatViewModel.setCurrentApp(app)
                         currentPage = Screen.MiniApp.route
+                    },
+                    onNavigateWorkbench = { req ->
+                        workbenchViewModel.createAndRun(
+                            title = req.title,
+                            userPrompt = req.userPrompt,
+                            modelId = req.modelId,
+                            enableThinking = req.enableThinking
+                        )
+                        currentPage = Screen.Workbench.route
                     }
                 )
+                Screen.Workbench.route -> {
+                    LaunchedEffect(Unit) { workbenchViewModel.reload() }
+                    WorkbenchListScreen(
+                        viewModel = workbenchViewModel,
+                        onOpenTask = { task ->
+                            activeDetailTaskId = task.id
+                            workbenchViewModel.setActiveTask(task.id)
+                            currentPage = Screen.WorkbenchDetail.route
+                        },
+                        onNewTask = {
+                            currentPage = Screen.Chat.route
+                        }
+                    )
+                }
+                Screen.WorkbenchDetail.route -> {
+                    WorkbenchDetailScreen(
+                        viewModel = workbenchViewModel,
+                        taskId = activeDetailTaskId,
+                        onRunApp = { appId ->
+                            val app = chatViewModel.miniAppStorage.loadById(appId)
+                            if (app != null) {
+                                chatViewModel.setCurrentApp(app)
+                                currentPage = Screen.MiniApp.route
+                            }
+                        },
+                        onRetry = { taskId ->
+                            workbenchViewModel.runTask(taskId)
+                        }
+                    )
+                }
                 Screen.Apps.route -> MiniAppListScreen(
                     storage = chatViewModel.miniAppStorage,
                     onRunApp = { app ->
