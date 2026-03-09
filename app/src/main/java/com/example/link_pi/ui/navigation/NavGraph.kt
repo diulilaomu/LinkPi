@@ -1,7 +1,11 @@
 package com.example.link_pi.ui.navigation
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,12 +16,14 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -40,13 +46,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.MaterialTheme
@@ -120,11 +134,83 @@ fun LinkPiApp() {
         return
     }
 
-    Column(
+    // Edge swipe detection for opening conversation list
+    val density = LocalDensity.current
+    val drawerWidthPx = with(density) { 280.dp.toPx() }
+    val edgeThresholdPx = with(density) { 88.dp.toPx() }
+    val minSwipeDistancePx = with(density) { 28.dp.toPx() }
+    val flingVelocityThresholdPx = with(density) { 900.dp.toPx() }
+    val drawerOffset = remember { Animatable(0f) }
+    var isDrawerDragging by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val drawerProgress = if (drawerWidthPx == 0f) 0f else ((drawerOffset.value + drawerWidthPx) / drawerWidthPx).coerceIn(0f, 1f)
+    val scrimProgress = ((drawerProgress - 0.65f) / 0.35f).coerceIn(0f, 1f)
+
+    LaunchedEffect(drawerWidthPx) {
+        drawerOffset.snapTo(if (showConversationList) 0f else -drawerWidthPx)
+    }
+
+    LaunchedEffect(showConversationList, currentPage, isDrawerDragging, drawerWidthPx) {
+        if (isDrawerDragging) return@LaunchedEffect
+        val target = if (showConversationList && currentPage == Screen.Chat.route) 0f else -drawerWidthPx
+        if (abs(drawerOffset.value - target) < 1f) {
+            drawerOffset.snapTo(target)
+        } else {
+            drawerOffset.animateTo(target, tween(durationMillis = if (target == 0f) 240 else 200))
+        }
+    }
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
+            .pointerInput(currentPage, showConversationList) {
+                if (currentPage != Screen.Chat.route) return@pointerInput
+                var dragEnabled = false
+                val velocityTracker = VelocityTracker()
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        velocityTracker.resetTracking()
+                        velocityTracker.addPosition(0L, offset)
+                        dragEnabled = if (showConversationList) {
+                            offset.x <= drawerWidthPx
+                        } else {
+                            offset.x <= edgeThresholdPx
+                        }
+                        isDrawerDragging = dragEnabled
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        if (!dragEnabled) return@detectHorizontalDragGestures
+                        change.consume()
+                        velocityTracker.addPosition(change.uptimeMillis, change.position)
+                        scope.launch {
+                            val nextOffset = (drawerOffset.value + dragAmount).coerceIn(-drawerWidthPx, 0f)
+                            drawerOffset.snapTo(nextOffset)
+                        }
+                    },
+                    onDragEnd = {
+                        if (!dragEnabled) return@detectHorizontalDragGestures
+                        isDrawerDragging = false
+                        dragEnabled = false
+                        val velocityX = velocityTracker.calculateVelocity().x
+                        val shouldOpen = when {
+                            velocityX > flingVelocityThresholdPx -> true
+                            velocityX < -flingVelocityThresholdPx -> false
+                            else -> drawerOffset.value > -drawerWidthPx / 2f ||
+                                (drawerProgress > 0.2f && drawerOffset.value > -drawerWidthPx + minSwipeDistancePx)
+                        }
+                        showConversationList = shouldOpen
+                    },
+                    onDragCancel = {
+                        if (dragEnabled) {
+                            isDrawerDragging = false
+                            dragEnabled = false
+                        }
+                    }
+                )
+            }
     ) {
+        Column(modifier = Modifier.fillMaxSize()) {
         // ── Fixed Top Bar ──
         Row(
             modifier = Modifier
@@ -134,16 +220,10 @@ fun LinkPiApp() {
         ) {
             when (currentPage) {
                 Screen.Chat.route -> {
-                    IconButton(onClick = { currentPage = Screen.Settings.route }) {
-                        Icon(Icons.Outlined.Settings, contentDescription = "设置")
-                    }
                     IconButton(onClick = { showConversationList = !showConversationList }) {
                         Icon(Icons.Outlined.History, contentDescription = "会话历史")
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    IconButton(onClick = { chatViewModel.newConversation() }) {
-                        Icon(Icons.Outlined.Edit, contentDescription = "新对话")
-                    }
                     IconButton(onClick = { currentPage = Screen.Apps.route }) {
                         Icon(Icons.Outlined.GridView, contentDescription = "应用")
                     }
@@ -220,35 +300,54 @@ fun LinkPiApp() {
                 Screen.ModuleSettings.route -> ModuleScreen()
                 Screen.ShareSettings.route -> ShareScreen()
             }
+        }
+    } // end Column
 
-            // ── 会话历史列表覆盖层 ──
-            if (showConversationList && currentPage == Screen.Chat.route) {
-                ConversationListPanel(
-                    chatViewModel = chatViewModel,
-                    onSelect = { convId ->
-                        chatViewModel.switchConversation(convId)
-                        showConversationList = false
-                    },
-                    onDelete = { convId -> chatViewModel.deleteConversation(convId) },
-                    onDismiss = { showConversationList = false }
+        // ── 会话历史列表覆盖层（跟手拖拽） ──
+        if (currentPage == Screen.Chat.route && drawerProgress > 0f) {
+            if (scrimProgress > 0f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.3f * scrimProgress))
+                        .clickable { showConversationList = false }
                 )
             }
+
+            ConversationListPanel(
+                modifier = Modifier.offset { IntOffset(drawerOffset.value.roundToInt(), 0) },
+                chatViewModel = chatViewModel,
+                onSelect = { convId ->
+                    chatViewModel.switchConversation(convId)
+                    showConversationList = false
+                },
+                onDelete = { convId -> chatViewModel.deleteConversation(convId) },
+                onNewConversation = {
+                    chatViewModel.newConversation()
+                    showConversationList = false
+                },
+                onNavigateSettings = {
+                    showConversationList = false
+                    currentPage = Screen.Settings.route
+                }
+            )
         }
-    }
+    } // end Box
 }
 
 @Composable
 private fun ConversationListPanel(
+    modifier: Modifier = Modifier,
     chatViewModel: ChatViewModel,
     onSelect: (String) -> Unit,
     onDelete: (String) -> Unit,
-    onDismiss: () -> Unit
+    onNewConversation: () -> Unit,
+    onNavigateSettings: () -> Unit
 ) {
     val conversations by chatViewModel.conversations.collectAsState()
     val activeConvId by chatViewModel.activeConversationId.collectAsState()
 
-    Row(modifier = Modifier.fillMaxSize()) {
-        // 左侧会话列表面板
+    Box(modifier = modifier.fillMaxHeight()) {
         Surface(
             modifier = Modifier
                 .width(280.dp)
@@ -257,77 +356,80 @@ private fun ConversationListPanel(
             shadowElevation = 8.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                Text(
-                    text = "会话历史",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(16.dp)
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                // ── 上部：会话列表 (80%) ──
+                Column(modifier = Modifier.weight(0.8f)) {
+                    Text(
+                        text = "会话历史",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
-                if (conversations.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "暂无历史会话",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f),
-                        contentPadding = PaddingValues(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(conversations, key = { it.id }) { conv ->
-                            val isActive = conv.id == activeConvId
-                            Card(
-                                onClick = { onSelect(conv.id) },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(
-                                    containerColor = if (isActive)
-                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                                    else
-                                        MaterialTheme.colorScheme.surfaceContainerLow
-                                ),
-                                shape = RoundedCornerShape(10.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                    if (conversations.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "暂无历史会话",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            items(conversations, key = { it.id }) { conv ->
+                                val isActive = conv.id == activeConvId
+                                Card(
+                                    onClick = { onSelect(conv.id) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isActive)
+                                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                                        else
+                                            MaterialTheme.colorScheme.surfaceContainerLow
+                                    ),
+                                    shape = RoundedCornerShape(10.dp)
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = conv.title,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = if (isActive) FontWeight.Medium else FontWeight.Normal,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                        Text(
-                                            text = formatTime(conv.updatedAt),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                        )
-                                    }
-                                    if (!isActive) {
-                                        IconButton(
-                                            onClick = { onDelete(conv.id) },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Outlined.Delete,
-                                                contentDescription = "删除",
-                                                modifier = Modifier.size(16.dp),
-                                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = conv.title,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                fontWeight = if (isActive) FontWeight.Medium else FontWeight.Normal,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
                                             )
+                                            Text(
+                                                text = formatTime(conv.updatedAt),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                            )
+                                        }
+                                        if (!isActive) {
+                                            IconButton(
+                                                onClick = { onDelete(conv.id) },
+                                                modifier = Modifier.size(32.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Outlined.Delete,
+                                                    contentDescription = "删除",
+                                                    modifier = Modifier.size(16.dp),
+                                                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -335,15 +437,69 @@ private fun ConversationListPanel(
                         }
                     }
                 }
+
+                // ── 下部：功能图标栏 (20%) ──
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                Row(
+                    modifier = Modifier
+                        .weight(0.2f)
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 新建会话
+                    Surface(
+                        onClick = onNewConversation,
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Outlined.Edit,
+                                contentDescription = "新对话",
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "新对话",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                    // 设置
+                    Surface(
+                        onClick = onNavigateSettings,
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Outlined.Settings,
+                                contentDescription = "设置",
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "设置",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
             }
         }
-        // 右侧半透明遮罩，点击关闭
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.3f))
-                .clickable { onDismiss() }
-        )
     }
 }
 

@@ -710,34 +710,45 @@ class WorkspaceManager(private val context: Context) {
 
         // 2. Check unclosed tags (self-closing tags excluded)
         val selfClosing = setOf("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr")
-        val openTagRegex = Regex("<([a-zA-Z][a-zA-Z0-9]*)(?:\\s[^>]*)?>")
-        val closeTagRegex = Regex("</([a-zA-Z][a-zA-Z0-9]*)\\s*>")
         val tagStack = mutableListOf<Pair<String, Int>>() // tag name, line number
 
-        // Strip <script>...</script> and <style>...</style> inner content to avoid false positives,
-        // but preserve line structure so line numbers stay accurate
-        val strippedContent = content
-            .replace(Regex("(<script(?:\\s[^>]*)?>)(.+?)(</script>)", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)) ) { m ->
+        // Strip HTML comments, <script> inner content, and <style> inner content
+        // to avoid false positives, preserving line structure for accurate line numbers
+        var strippedContent = content
+            // Strip HTML comments first (may span multiple lines)
+            .replace(Regex("<!--.*?-->", setOf(RegexOption.DOT_MATCHES_ALL))) { m ->
+                "\n".repeat(m.value.count { it == '\n' })
+            }
+            // Strip <script>...</script> inner content (.*? handles empty blocks too)
+            .replace(Regex("(<script(?:\\s[^>]*)?>)(.*?)(</script>)", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))) { m ->
                 m.groupValues[1] + "\n".repeat(m.groupValues[2].count { it == '\n' }) + m.groupValues[3]
             }
-            .replace(Regex("(<style(?:\\s[^>]*)?>)(.+?)(</style>)", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)) ) { m ->
+            // Strip <style>...</style> inner content
+            .replace(Regex("(<style(?:\\s[^>]*)?>)(.*?)(</style>)", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))) { m ->
                 m.groupValues[1] + "\n".repeat(m.groupValues[2].count { it == '\n' }) + m.groupValues[3]
             }
+
+        // Use a proper tag tokenizer that handles quoted attributes containing '>'
+        val tagTokenRegex = Regex("""</?([a-zA-Z][a-zA-Z0-9-]*)(?:\s+(?:[^>"']*|"[^"]*"|'[^']*')*)?\s*/?>|</([a-zA-Z][a-zA-Z0-9-]*)\s*>""")
         val lines = strippedContent.lines()
         for ((lineIdx, line) in lines.withIndex()) {
-            for (match in openTagRegex.findAll(line)) {
-                val tag = match.groupValues[1].lowercase()
-                if (tag !in selfClosing && !match.value.endsWith("/>")) {
-                    tagStack.add(tag to (lineIdx + 1))
-                }
-            }
-            for (match in closeTagRegex.findAll(line)) {
-                val tag = match.groupValues[1].lowercase()
-                val lastIdx = tagStack.indexOfLast { it.first == tag }
-                if (lastIdx >= 0) {
-                    tagStack.removeAt(lastIdx)
+            for (match in tagTokenRegex.findAll(line)) {
+                val raw = match.value
+                if (raw.startsWith("</")) {
+                    // Close tag
+                    val tag = (match.groupValues[1].ifBlank { match.groupValues[2] }).lowercase()
+                    val lastIdx = tagStack.indexOfLast { it.first == tag }
+                    if (lastIdx >= 0) {
+                        tagStack.removeAt(lastIdx)
+                    } else {
+                        issues.add("[错误] 第${lineIdx + 1}行: 多余的关闭标签 </$tag>")
+                    }
                 } else {
-                    issues.add("[错误] 第${lineIdx + 1}行: 多余的关闭标签 </$tag>")
+                    // Open tag (or self-closing)
+                    val tag = match.groupValues[1].lowercase()
+                    if (tag !in selfClosing && !raw.endsWith("/>")) {
+                        tagStack.add(tag to (lineIdx + 1))
+                    }
                 }
             }
         }
@@ -754,7 +765,6 @@ class WorkspaceManager(private val context: Context) {
                 if (src.isBlank()) {
                     issues.add("[警告] 第${lineIdx + 1}行: <script> src为空")
                 } else if (!src.startsWith("http") && !src.startsWith("//") && !src.startsWith("data:")) {
-                    // Check if local file exists
                     val refFile = resolveSecure(appId, src)
                     if (refFile != null && !refFile.exists()) {
                         issues.add("[警告] 第${lineIdx + 1}行: 引用的文件不存在: $src")
@@ -763,14 +773,21 @@ class WorkspaceManager(private val context: Context) {
             }
         }
 
-        // 4. Check for common JS issues inside <script> blocks
+        // 4. Check for common JS issues inside <script> blocks — only check brace balance,
+        //    stripping strings and comments first to avoid false positives
         val scriptBlockRegex = Regex("""<script(?:\s[^>]*)?>(.+?)</script>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
         for (match in scriptBlockRegex.findAll(content)) {
-            val jsContent = match.groupValues[1]
+            val jsRaw = match.groupValues[1]
             val jsStartLine = content.substring(0, match.range.first).count { it == '\n' } + 1
-            // Check for unmatched braces
+            // Strip JS strings (single/double/template), single-line comments, multi-line comments, regex literals
+            val jsStripped = jsRaw
+                .replace(Regex("""//[^\n]*"""), "")                            // single-line comments
+                .replace(Regex("""/\*.*?\*/""", RegexOption.DOT_MATCHES_ALL), "")  // multi-line comments
+                .replace(Regex(""""(?:[^"\\]|\\.)*""""), "")                   // double-quoted strings
+                .replace(Regex("""'(?:[^'\\]|\\.)*'"""), "")                   // single-quoted strings
+                .replace(Regex("""`(?:[^`\\]|\\.)*`""", RegexOption.DOT_MATCHES_ALL), "")  // template literals
             var braceCount = 0; var parenCount = 0; var bracketCount = 0
-            for (ch in jsContent) {
+            for (ch in jsStripped) {
                 when (ch) { '{' -> braceCount++; '}' -> braceCount--; '(' -> parenCount++; ')' -> parenCount--; '[' -> bracketCount++; ']' -> bracketCount-- }
             }
             if (braceCount != 0) issues.add("[警告] 第${jsStartLine}行附近: JS代码中花括号 {} 不匹配 (差${kotlin.math.abs(braceCount)}个)")

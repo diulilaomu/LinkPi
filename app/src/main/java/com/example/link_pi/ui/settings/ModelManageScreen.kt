@@ -56,6 +56,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.link_pi.network.AiConfig
@@ -600,13 +601,27 @@ fun ParameterSection(
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Max Tokens", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        maxTokens.toString(),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
+                    var tokenTextFieldValue by remember(maxTokens) { mutableStateOf(maxTokens.toString()) }
+                    OutlinedTextField(
+                        value = tokenTextFieldValue,
+                        onValueChange = { raw ->
+                            tokenTextFieldValue = raw.filter { it.isDigit() }
+                            val parsed = tokenTextFieldValue.toIntOrNull()
+                            if (parsed != null && parsed in 1..131072) {
+                                onMaxTokensChange(parsed)
+                            }
+                        },
+                        modifier = Modifier.width(120.dp),
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            textAlign = TextAlign.End,
+                            color = MaterialTheme.colorScheme.primary
+                        ),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true
                     )
                 }
                 Slider(
@@ -616,7 +631,7 @@ fun ParameterSection(
                     steps = 0
                 )
                 Text(
-                    "控制模型单次回复的最大长度",
+                    "控制模型单次回复的最大长度（1024-131072）",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )

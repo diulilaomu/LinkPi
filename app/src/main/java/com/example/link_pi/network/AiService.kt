@@ -18,6 +18,16 @@ data class ChatResponse(
 
 class AiService(private val config: AiConfig) {
 
+    /** The active model's configured max_tokens ceiling. */
+    val modelMaxTokens: Int get() = config.activeModel.maxTokens
+
+    companion object {
+        private const val MAX_REASONING_CHARS = 12_000
+        private const val REASONING_PREVIEW_CHARS = 2_000
+        private const val THINKING_EMIT_STEP = 160
+        private const val CONTENT_EMIT_STEP = 160
+    }
+
     // Separate client for AI API calls — allows redirects (some API gateways redirect)
     private val client = okhttp3.OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -126,11 +136,13 @@ class AiService(private val config: AiConfig) {
 
         val thinkingBuf = StringBuilder()
         val contentBuf = StringBuilder()
-        var lastEmitLen = 0
-        var lastContentEmitLen = 0
+        var pendingThinkingChars = 0
+        var pendingContentChars = 0
 
         val reader: BufferedReader = response.body?.byteStream()?.bufferedReader()
             ?: throw IOException("Empty stream body")
+
+        var sseError: String? = null
 
         reader.use { r ->
             var line = r.readLine()
@@ -140,6 +152,15 @@ class AiService(private val config: AiConfig) {
                     if (data == "[DONE]") break   // stream finished — exit immediately
                     try {
                         val chunk = JSONObject(data)
+
+                        // Detect API error objects returned inside SSE stream
+                        if (chunk.has("error")) {
+                            val errObj = chunk.optJSONObject("error")
+                            sseError = errObj?.optString("message")
+                                ?: chunk.optString("error", "Unknown SSE error")
+                            break
+                        }
+
                         val delta = chunk.getJSONArray("choices")
                             .getJSONObject(0)
                             .optJSONObject("delta")
@@ -148,27 +169,29 @@ class AiService(private val config: AiConfig) {
                             val thinkDelta = if (delta.isNull("reasoning_content")) ""
                                 else delta.optString("reasoning_content", "")
                             if (thinkDelta.isNotEmpty()) {
-                                thinkingBuf.append(thinkDelta)
+                                appendCapped(thinkingBuf, thinkDelta, MAX_REASONING_CHARS)
+                                pendingThinkingChars += thinkDelta.length
                             }
 
                             val contentDelta = if (delta.isNull("content")) ""
                                 else delta.optString("content", "")
                             if (contentDelta.isNotEmpty()) {
                                 contentBuf.append(contentDelta)
+                                pendingContentChars += contentDelta.length
                             }
                         }
                     } catch (_: Exception) { /* skip malformed chunks */ }
                 }
 
-                // Emit accumulated thinking in real-time (every ~50 chars of new thinking)
-                if (thinkingBuf.length - lastEmitLen >= 50) {
-                    lastEmitLen = thinkingBuf.length
-                    onThinkingDelta(thinkingBuf.toString())
+                // Emit thinking preview in real-time, but cap payload to avoid UI/OOM issues.
+                if (pendingThinkingChars >= THINKING_EMIT_STEP) {
+                    pendingThinkingChars = 0
+                    onThinkingDelta(thinkingBuf.toString().takeLast(REASONING_PREVIEW_CHARS))
                 }
 
-                // Emit accumulated content in real-time (every ~80 chars)
-                if (contentBuf.length - lastContentEmitLen >= 80) {
-                    lastContentEmitLen = contentBuf.length
+                // Emit accumulated content in real-time.
+                if (pendingContentChars >= CONTENT_EMIT_STEP) {
+                    pendingContentChars = 0
                     onContentDelta(contentBuf.toString())
                 }
 
@@ -176,16 +199,29 @@ class AiService(private val config: AiConfig) {
             }
         }
 
-        // Final emit of full thinking
-        if (thinkingBuf.isNotEmpty() && thinkingBuf.length > lastEmitLen) {
-            onThinkingDelta(thinkingBuf.toString())
+        // If an API error was detected in the SSE stream, throw so callers can handle/retry
+        if (sseError != null) {
+            throw IOException("API SSE error: $sseError")
+        }
+
+        // Final emit of reasoning preview
+        if (thinkingBuf.isNotEmpty() && pendingThinkingChars > 0) {
+            onThinkingDelta(thinkingBuf.toString().takeLast(REASONING_PREVIEW_CHARS))
         }
         // Final emit of full content
-        if (contentBuf.isNotEmpty() && contentBuf.length > lastContentEmitLen) {
+        if (contentBuf.isNotEmpty() && pendingContentChars > 0) {
             onContentDelta(contentBuf.toString())
         }
 
         ChatResponse(contentBuf.toString(), thinkingBuf.toString())
+    }
+
+    private fun appendCapped(buffer: StringBuilder, delta: String, maxChars: Int) {
+        buffer.append(delta)
+        val overflow = buffer.length - maxChars
+        if (overflow > 0) {
+            buffer.delete(0, overflow)
+        }
     }
 
     /**

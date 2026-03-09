@@ -32,10 +32,15 @@ class AgentOrchestrator(
 ) {
     companion object {
         private const val MAX_TOOL_ITERATIONS = 15
-        private const val PLANNING_TOKENS = 16384
-        private const val GENERATION_TOKENS = 65536
+        private const val PLANNING_TOKENS_IDEAL = 16384
+        private const val GENERATION_TOKENS_IDEAL = 65536
         private val FILE_TOOLS = setOf("create_file", "write_file", "append_file", "replace_in_file", "replace_lines", "insert_lines", "create_directory", "delete_directory", "delete_workspace_file", "rename_file", "copy_file")
     }
+
+    /** Respect the model's actual max_tokens ceiling so we never send an unsupported value. */
+    private val modelCap: Int get() = aiService.modelMaxTokens
+    private val PLANNING_TOKENS get() = minOf(PLANNING_TOKENS_IDEAL, modelCap)
+    private val GENERATION_TOKENS get() = minOf(GENERATION_TOKENS_IDEAL, modelCap)
 
     suspend fun run(
         conversationMessages: List<Map<String, String>>,
@@ -167,6 +172,8 @@ class AgentOrchestrator(
                     if (wsApp != null) {
                         onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                         return cleanResult(response, wsApp, toolIterations, latestThinking)
+                    } else {
+                        onStep(AgentStep(StepType.THINKING, "工作区诊断", buildWorkspaceAppDiagnosis(toolExecutor.currentAppId)))
                     }
                 }
                 // For non-app intents (CONVERSATION etc.), check if AI already produced HTML
@@ -239,6 +246,8 @@ class AgentOrchestrator(
             if (wsApp != null) {
                 onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                 return cleanResult(messages.lastOrNull { it["role"] == "assistant" }?.get("content") ?: "", wsApp, toolIterations, latestThinking)
+            } else {
+                onStep(AgentStep(StepType.THINKING, "工作区诊断", buildWorkspaceAppDiagnosis(toolExecutor.currentAppId)))
             }
         }
 
@@ -279,11 +288,24 @@ class AgentOrchestrator(
         }
         compressedMessages.add(genInstructionMsg)
 
-        val genResp = callAi(compressedMessages, GENERATION_TOKENS, enableThinking, "Generation", onStep, onStepSync)
-        val genResponse = genResp.content
+        var genResp = callAi(compressedMessages, GENERATION_TOKENS, enableThinking, "Generation", onStep, onStepSync)
+        var genResponse = genResp.content
+
+        // If content is empty but we sent enable_thinking, the model may not support it — retry without
+        if (genResponse.isBlank() && enableThinking) {
+            onStep(AgentStep(StepType.THINKING, "响应为空，关闭深度思考重试..."))
+            genResp = callAi(compressedMessages, GENERATION_TOKENS, false, "Generation重试", onStep, onStepSync)
+            genResponse = genResp.content
+        }
+
+        // Fallback: if content is still empty but thinkingContent has substance, use it
+        if (genResponse.isBlank() && genResp.thinkingContent.length > 200) {
+            genResponse = genResp.thinkingContent
+        }
+
         if (genResp.thinkingContent.isNotBlank()) {
             latestThinking = genResp.thinkingContent
-            onStep(AgentStep(StepType.THINKING, "💡 Generation 思考完成", genResp.thinkingContent))
+            onStep(AgentStep(StepType.THINKING, "💡 Generation 思考完成", genResp.thinkingContent.takeLast(2000)))
         }
 
         // Check if generation phase used file tools
@@ -325,6 +347,8 @@ class AgentOrchestrator(
                         if (wsApp != null) {
                             onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                             return cleanResult(contResponse, wsApp, toolIterations + extraIterations, latestThinking)
+                        } else {
+                            onStep(AgentStep(StepType.THINKING, "工作区诊断", buildWorkspaceAppDiagnosis(toolExecutor.currentAppId)))
                         }
                     }
                     val miniApp = MiniAppParser.extractMiniApp(contResponse)
@@ -357,6 +381,8 @@ class AgentOrchestrator(
                 if (wsApp != null) {
                     onStep(AgentStep(StepType.FINAL_RESPONSE, "工作空间应用生成完成", wsApp.name))
                     return cleanResult(genResponse, wsApp, toolIterations, latestThinking)
+                } else {
+                    onStep(AgentStep(StepType.THINKING, "工作区诊断", buildWorkspaceAppDiagnosis(toolExecutor.currentAppId)))
                 }
             }
         }
@@ -505,7 +531,12 @@ class AgentOrchestrator(
     private fun buildWorkspaceApp(appId: String, response: String): MiniApp? {
         val wm = toolExecutor.workspaceManager
         if (!wm.hasFiles(appId)) return null
-        val entryContent = wm.readEntryFile(appId) ?: return null
+        val files = wm.getAllFiles(appId)
+        val entryFile = when {
+            "index.html" in files -> "index.html"
+            else -> files.firstOrNull { it.endsWith(".html", ignoreCase = true) }
+        } ?: return null
+        val entryContent = wm.readEntryFile(appId, entryFile) ?: return null
 
         // Check if this is a modification of an existing app
         val existingApp = toolExecutor.miniAppStorage.loadById(appId)
@@ -515,7 +546,6 @@ class AgentOrchestrator(
         val titleFromHtml = titleRegex.find(entryContent)?.groupValues?.get(1)?.trim()
         val name = titleFromHtml ?: existingApp?.name ?: "Multi-File App"
 
-        val files = wm.getAllFiles(appId)
         val description = if (existingApp != null) {
             "${existingApp.description} (已修改, ${files.size} 个文件)"
         } else {
@@ -538,8 +568,46 @@ class AgentOrchestrator(
             htmlContent = entryContent,
             createdAt = existingApp?.createdAt ?: System.currentTimeMillis(),
             isWorkspaceApp = true,
-            entryFile = "index.html"
+            entryFile = entryFile
         )
+    }
+
+    private fun buildWorkspaceAppDiagnosis(appId: String): String {
+        val wm = toolExecutor.workspaceManager
+        if (!wm.hasFiles(appId)) {
+            return "未检测到工作区文件。app_id=$appId"
+        }
+
+        val files = wm.getAllFiles(appId)
+        val htmlFiles = files.filter { it.endsWith(".html", ignoreCase = true) }
+        val entryFile = when {
+            "index.html" in files -> "index.html"
+            else -> htmlFiles.firstOrNull()
+        }
+        val entryRead = entryFile?.let { wm.readEntryFile(appId, it) }
+        val validation = entryFile?.let { wm.validateHtml(appId, it) }
+        val runtimeErrors = RuntimeErrorCollector.getErrors(appId)
+
+        return buildString {
+            appendLine("app_id=$appId")
+            appendLine("文件数=${files.size}")
+            appendLine("文件列表=${if (files.isEmpty()) "(空)" else files.take(20).joinToString(", ")}")
+            if (files.size > 20) appendLine("文件列表已截断，剩余 ${files.size - 20} 个")
+            appendLine("HTML文件=${if (htmlFiles.isEmpty()) "(无)" else htmlFiles.joinToString(", ")}")
+            appendLine("识别入口=${entryFile ?: "(无)"}")
+            appendLine("入口读取=${when {
+                entryFile == null -> "失败: 未找到 HTML 入口"
+                entryRead == null -> "失败: readEntryFile 返回 null"
+                entryRead.isBlank() -> "失败: 入口文件为空"
+                else -> "成功: ${entryRead.length} chars"
+            }}")
+            if (validation != null) {
+                appendLine("HTML校验=${validation.take(300)}")
+            }
+            if (runtimeErrors.isNotEmpty()) {
+                appendLine("运行时错误=${runtimeErrors.take(5).joinToString(" | ")}")
+            }
+        }.trimEnd()
     }
 
     /**

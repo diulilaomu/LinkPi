@@ -364,105 +364,109 @@ fun ChatScreen(
                         .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Model selector toggle
-                    Surface(
-                        onClick = { showModelMenu = !showModelMenu },
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (showModelMenu)
-                            MaterialTheme.colorScheme.primaryContainer
-                        else
-                            Color.Transparent
+                    // Left tools — shrinkable so send button is never squeezed
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        // Model selector toggle
+                        Surface(
+                            onClick = { showModelMenu = !showModelMenu },
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (showModelMenu)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                Color.Transparent
                         ) {
-                            Text(
-                                text = activeModel?.name?.ifBlank { activeModel?.model ?: "模型" } ?: "模型",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (showModelMenu)
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.widthIn(max = 100.dp)
-                            )
-                            val arrowRotation by animateFloatAsState(
-                                targetValue = if (showModelMenu) 180f else 0f,
-                                label = "arrow"
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = activeModel?.name?.ifBlank { activeModel?.model ?: "模型" } ?: "模型",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (showModelMenu)
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.widthIn(max = 80.dp)
+                                )
+                                val arrowRotation by animateFloatAsState(
+                                    targetValue = if (showModelMenu) 180f else 0f,
+                                    label = "arrow"
+                                )
+                                Icon(
+                                    Icons.Filled.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .rotate(arrowRotation),
+                                    tint = if (showModelMenu)
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        // Deep thinking toggle
+                        Surface(
+                            onClick = { viewModel.toggleDeepThinking() },
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (deepThinking)
+                                MaterialTheme.colorScheme.primaryContainer
+                            else
+                                Color.Transparent
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Lightbulb,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = if (deepThinking)
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                                Text(
+                                    text = "深度思考",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (deepThinking)
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    else
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+
+                        // File attachment button
+                        Surface(
+                            onClick = {
+                                filePickerLauncher.launch(arrayOf(
+                                    "text/plain", "text/markdown", "text/x-markdown",
+                                    "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"
+                                ))
+                            },
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color.Transparent
+                        ) {
                             Icon(
-                                Icons.Filled.KeyboardArrowDown,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(14.dp)
-                                    .rotate(arrowRotation),
-                                tint = if (showModelMenu)
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                Icons.Outlined.AttachFile,
+                                contentDescription = "附件",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             )
                         }
                     }
 
-                    // Deep thinking toggle
-                    Surface(
-                        onClick = { viewModel.toggleDeepThinking() },
-                        shape = RoundedCornerShape(16.dp),
-                        color = if (deepThinking)
-                            MaterialTheme.colorScheme.primaryContainer
-                        else
-                            Color.Transparent
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            Icon(
-                                Icons.Outlined.Lightbulb,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = if (deepThinking)
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                            Text(
-                                text = "深度思考",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (deepThinking)
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                else
-                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-
-                    // File attachment button
-                    Surface(
-                        onClick = {
-                            filePickerLauncher.launch(arrayOf(
-                                "text/plain", "text/markdown", "text/x-markdown",
-                                "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"
-                            ))
-                        },
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color.Transparent
-                    ) {
-                        Icon(
-                            Icons.Outlined.AttachFile,
-                            contentDescription = "附件",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.weight(1f))
-
-                    // Send button
+                    // Send button — fixed, never squeezed
                     val canSend = (inputText.isNotBlank() || pendingAttachments.isNotEmpty()) && !isLoading
                     Surface(
                         onClick = {
