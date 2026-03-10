@@ -84,7 +84,10 @@ object BuiltInSkills {
 3. 设计简短的架构规划（2-5句）：主要功能、布局、技术方案
    - ⚡ 模块优先：功能涉及外部 API/设备通信时，优先通过 call_module 调用已有模块；模块不存在时，再考虑用 create_module 创建新模块；仅当模块机制不适用时，才使用底层 NativeBridge/工具组组合开发
 4. 从上方「能力目录」中选择应用所需的能力
-5. 在回复末尾附加 `<capability_selection>` 块：
+5. 评估生成模式——根据应用复杂度选择：
+   - **FAST**：简单应用（≤5文件、无需调用模块/网络搜索、纯前端展示/游戏/工具）→ 一次性输出所有文件，无需工具调用
+   - **FULL**：复杂应用（需要 call_module、web_search、动态数据、多文件交互逻辑复杂）→ 使用完整工具调用流程
+6. 在回复末尾附加 `<capability_selection>` 和 `<generation_mode>` 块：
 
 <capability_selection>
 tools: NETWORK, MODULE
@@ -92,11 +95,14 @@ bridge: STORAGE, UI_FEEDBACK, SENSOR
 cdn: CHART, FRAMEWORK
 </capability_selection>
 
+<generation_mode>FAST</generation_mode>
+
 - 只列出实际需要的组；没有选择的行可省略
 - 基础文件工具（create_file、write_file 等）始终可用——无需选择
 - 系统会在生成阶段注入你所选能力的完整文档
+- generation_mode 只填 FAST 或 FULL
 
-⛔ 不要输出任何 HTML/CSS/JS 代码或 ```html 代码块。只输出规划文本 + capability_selection。
+⛔ 不要输出任何 HTML/CSS/JS 代码或 ```html 代码块。只输出规划文本 + capability_selection + generation_mode。
 """.trimIndent()
 
     val CREATE_APP_WORKFLOW = """
@@ -115,6 +121,7 @@ cdn: CHART, FRAMEWORK
 
 规则：
 - ⚡ 模块优先：需要外部 API/设备通信的功能，优先使用 callModule() 调用已有模块，而非用 nativeFetch 从零构建
+- 📁 文件应拆尽拆：HTML、CSS、JS 必须分离为独立文件，JS 按功能模块拆分（如 config.js、utils.js、app.js），禁止将所有代码塞进单个文件
 - index.html 为入口文件，使用相对路径：`<link href="css/style.css">`、`<script src="js/app.js">`
 - 使用描述性的 <title> 标签作为应用名称
 - 应用需移动端友好且响应式（使用 viewport meta 标签）
@@ -133,6 +140,78 @@ cdn: CHART, FRAMEWORK
 {"tool": "validate_html", "args": {"path": "index.html"}}
 </tool_call>
 如果 validate_html 报告了错误，立即修复后再结束。
+""".trimIndent()
+
+    val FAST_CREATE_WORKFLOW = """
+### 工作流：快速创建应用（单次输出）
+
+你在生成阶段（FAST 模式）。一次性输出所有文件，不要使用任何工具调用。
+
+使用 `<file path="...">` 标签输出每个文件的完整内容：
+
+<file path="index.html">
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>应用名称</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  ...
+  <script src="js/app.js"></script>
+</body>
+</html>
+</file>
+
+<file path="css/style.css">
+body { ... }
+</file>
+
+<file path="js/app.js">
+// 应用逻辑
+</file>
+
+规则：
+- ⚡ 必须使用 <file path="...">content</file> 格式输出每个文件
+- 📁 HTML、CSS、JS 必须分离为独立文件
+- index.html 为入口文件，使用相对路径引用其他文件
+- 使用描述性的 <title> 标签作为应用名称
+- 应用需移动端友好且响应式（使用 viewport meta 标签）
+- 使用现代 CSS 打造精美的 UI
+- 输出完整代码——绝对不要截断、省略或使用 "// 其余代码"
+- 不要使用 <tool_call> — 此模式下不可用
+- 简单应用（CSS<100行且JS<200行）允许合并为单个 index.html 文件
+""".trimIndent()
+
+    val PLANNING_MODIFY_WORKFLOW = """
+### 工作流：修改应用（规划阶段）
+
+你当前处于规划阶段。你的任务是分析现有代码并制定修改计划，而不是直接修改代码。
+
+1. 检查工作区状态：
+<tool_call>
+{"tool": "list_workspace_files", "args": {}}
+</tool_call>
+
+2. 如果工作区为空，查找并打开目标应用：
+<tool_call>
+{"tool": "list_saved_apps", "args": {}}
+</tool_call>
+<tool_call>
+{"tool": "open_app_workspace", "args": {"app_id": "粘贴实际UUID"}}
+</tool_call>
+
+3. 读取需要修改的文件，理解现有代码结构：
+<tool_call>
+{"tool": "read_workspace_file", "args": {"path": "index.html"}}
+</tool_call>
+
+4. 输出简短的修改计划（2-5句）：说明要修改哪些文件、哪些函数/区域、改动内容
+5. 在末尾附加 capability_selection（如需额外能力）
+
+⛔ 规划阶段不要修改任何文件——不要调用 write_file、replace_in_file、create_file 等写入工具。只读取和分析。
 """.trimIndent()
 
     val MODIFY_APP_WORKFLOW = """
@@ -326,11 +405,16 @@ callModule('dlt645_meter', 'read_energy', {
 </tool_call>
 """.trimIndent()
 
-    /** 根据意图×阶段选择对应工作流模板 */
-    fun resolveWorkflow(intent: UserIntent, phase: AgentPhase): String = when {
+    /** 根据意图×阶段×模式选择对应工作流模板 */
+    fun resolveWorkflow(
+        intent: UserIntent,
+        phase: AgentPhase,
+        fast: Boolean = false
+    ): String = when {
         intent == UserIntent.CREATE_APP && phase == AgentPhase.PLANNING -> PLANNING_CREATE_WORKFLOW
+        intent == UserIntent.CREATE_APP && phase == AgentPhase.GENERATION && fast -> FAST_CREATE_WORKFLOW
         intent == UserIntent.CREATE_APP && phase == AgentPhase.GENERATION -> CREATE_APP_WORKFLOW
-        intent == UserIntent.MODIFY_APP && phase == AgentPhase.PLANNING -> MODIFY_APP_WORKFLOW
+        intent == UserIntent.MODIFY_APP && phase == AgentPhase.PLANNING -> PLANNING_MODIFY_WORKFLOW
         intent == UserIntent.MODIFY_APP && phase == AgentPhase.GENERATION -> MODIFY_APP_GEN_WORKFLOW
         intent == UserIntent.MODULE_MGMT -> MODULE_WORKFLOW
         else -> ""

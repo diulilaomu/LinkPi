@@ -203,18 +203,17 @@ fun ChatScreen(
                     onRegenerate = { viewModel.regenerateLastResponse() }
                 )
             }
-            if (pendingWorkbench != null) {
+            pendingWorkbench?.let { wb ->
                 item {
                     AppCreationCard(
-                        title = pendingWorkbench!!.title,
-                        prompt = pendingWorkbench!!.userPrompt,
+                        title = wb.title,
+                        prompt = wb.userPrompt,
                         onConfirm = {
                             val req = viewModel.confirmWorkbench()
                             if (req != null) onNavigateWorkbench(req)
                         },
                         onDismiss = {
                             viewModel.dismissWorkbench()
-                            viewModel.launchOrchestratorPublic()
                         }
                     )
                 }

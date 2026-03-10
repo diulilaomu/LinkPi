@@ -27,8 +27,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
- * Confirmation card shown in chat when a CREATE_APP intent is detected.
- * The user can confirm (→ navigate to workbench) or dismiss (→ run in chat).
+ * Confirmation card shown in chat when a CREATE_APP or MODIFY_APP intent is detected.
+ * The user can confirm (→ navigate to workbench) or dismiss (→ cancel).
  */
 @Composable
 fun AppCreationCard(
@@ -83,14 +83,19 @@ fun AppCreationCard(
             Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                OutlinedButton(onClick = onDismiss) {
-                    Text("在聊天中生成")
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("取消")
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(onClick = onConfirm) {
+                Button(
+                    onClick = onConfirm,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Text("进入工作台")
                 }
             }

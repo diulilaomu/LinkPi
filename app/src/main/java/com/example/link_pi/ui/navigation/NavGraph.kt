@@ -219,7 +219,8 @@ fun LinkPiApp() {
             }
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-        // ── Fixed Top Bar ──
+        // ── Fixed Top Bar (hidden on Workbench pages) ──
+        if (currentPage != Screen.WorkbenchDetail.route && currentPage != Screen.Workbench.route) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -239,7 +240,6 @@ fun LinkPiApp() {
                 else -> {
                     val title = when (currentPage) {
                         Screen.Workbench.route -> Screen.Workbench.title
-                        Screen.WorkbenchDetail.route -> Screen.WorkbenchDetail.title
                         Screen.Apps.route -> Screen.Apps.title
                         Screen.Settings.route -> Screen.Settings.title
                         Screen.ModelManage.route -> Screen.ModelManage.title
@@ -251,7 +251,6 @@ fun LinkPiApp() {
                         else -> ""
                     }
                     val backTarget = when (currentPage) {
-                        Screen.WorkbenchDetail.route -> Screen.Workbench.route
                         Screen.ModelManage.route,
                         Screen.SkillSettings.route,
                         Screen.MemorySettings.route,
@@ -266,6 +265,7 @@ fun LinkPiApp() {
                     Text(title, style = MaterialTheme.typography.titleLarge)
                 }
             }
+        }
         }
 
         // ── Content Area (fills remaining space) ──
@@ -282,19 +282,23 @@ fun LinkPiApp() {
                         currentPage = Screen.MiniApp.route
                     },
                     onNavigateWorkbench = { req ->
-                        workbenchViewModel.createAndRun(
+                        val taskId = workbenchViewModel.createAndRun(
                             title = req.title,
                             userPrompt = req.userPrompt,
                             modelId = req.modelId,
-                            enableThinking = req.enableThinking
+                            enableThinking = req.enableThinking,
+                            appId = req.appId
                         )
-                        currentPage = Screen.Workbench.route
+                        activeDetailTaskId = taskId
+                        workbenchViewModel.setActiveTask(taskId)
+                        currentPage = Screen.WorkbenchDetail.route
                     }
                 )
                 Screen.Workbench.route -> {
                     LaunchedEffect(Unit) { workbenchViewModel.reload() }
                     WorkbenchListScreen(
                         viewModel = workbenchViewModel,
+                        onBack = { currentPage = Screen.Chat.route },
                         onOpenTask = { task ->
                             activeDetailTaskId = task.id
                             workbenchViewModel.setActiveTask(task.id)
@@ -309,11 +313,14 @@ fun LinkPiApp() {
                     WorkbenchDetailScreen(
                         viewModel = workbenchViewModel,
                         taskId = activeDetailTaskId,
+                        onBack = { currentPage = Screen.Workbench.route },
                         onRunApp = { appId ->
-                            val app = chatViewModel.miniAppStorage.loadById(appId)
+                            val app = workbenchViewModel.loadMiniApp(appId)
                             if (app != null) {
                                 chatViewModel.setCurrentApp(app)
                                 currentPage = Screen.MiniApp.route
+                            } else {
+                                Toast.makeText(context, "应用不存在或未完成生成", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onRetry = { taskId ->

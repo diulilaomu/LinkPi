@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
@@ -39,10 +40,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -52,6 +55,7 @@ import com.example.link_pi.workbench.WorkbenchTask
 @Composable
 fun WorkbenchListScreen(
     viewModel: WorkbenchViewModel,
+    onBack: () -> Unit,
     onOpenTask: (WorkbenchTask) -> Unit,
     onNewTask: () -> Unit
 ) {
@@ -59,11 +63,24 @@ fun WorkbenchListScreen(
 
     Scaffold(
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = onNewTask,
-                containerColor = MaterialTheme.colorScheme.primary
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 32.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(Icons.Default.Add, contentDescription = "新建应用", tint = MaterialTheme.colorScheme.onPrimary)
+                FloatingActionButton(
+                    onClick = onBack,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回",
+                        tint = MaterialTheme.colorScheme.onSurface)
+                }
+                FloatingActionButton(
+                    onClick = onNewTask,
+                    containerColor = MaterialTheme.colorScheme.primary
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "新建应用",
+                        tint = MaterialTheme.colorScheme.onPrimary)
+                }
             }
         }
     ) { padding ->
@@ -241,6 +258,29 @@ private fun TaskCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             // Bottom actions row
+            var showDeleteConfirm by remember { mutableStateOf(false) }
+
+            if (showDeleteConfirm) {
+                androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { showDeleteConfirm = false },
+                    title = { Text("确认删除") },
+                    text = { Text("确定要删除「${task.title}」及其所有文件吗？此操作不可撤销。") },
+                    dismissButton = {
+                        androidx.compose.material3.TextButton(onClick = { showDeleteConfirm = false }) {
+                            Text("取消")
+                        }
+                    },
+                    confirmButton = {
+                        androidx.compose.material3.TextButton(onClick = {
+                            showDeleteConfirm = false
+                            onDelete()
+                        }) {
+                            Text("删除", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                )
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -254,7 +294,7 @@ private fun TaskCard(
                 )
                 // Delete button
                 IconButton(
-                    onClick = onDelete,
+                    onClick = { showDeleteConfirm = true },
                     modifier = Modifier.size(28.dp)
                 ) {
                     Icon(
@@ -276,13 +316,6 @@ private fun statusLabel(status: TaskStatus): String = when (status) {
     TaskStatus.CHECKING -> "自检中"
     TaskStatus.COMPLETED -> "已完成"
     TaskStatus.FAILED -> "失败"
-}
-
-private fun statusIcon(status: TaskStatus): ImageVector = when (status) {
-    TaskStatus.QUEUED -> Icons.Outlined.Schedule
-    TaskStatus.PLANNING, TaskStatus.GENERATING, TaskStatus.CHECKING -> Icons.Outlined.Code
-    TaskStatus.COMPLETED -> Icons.Default.PlayArrow
-    TaskStatus.FAILED -> Icons.Outlined.ErrorOutline
 }
 
 private fun formatTaskTime(timestamp: Long): String {

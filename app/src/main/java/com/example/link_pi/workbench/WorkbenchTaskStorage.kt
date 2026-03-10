@@ -1,6 +1,7 @@
 package com.example.link_pi.workbench
 
 import android.content.Context
+import android.util.Log
 import org.json.JSONObject
 import java.io.File
 
@@ -33,7 +34,19 @@ class WorkbenchTaskStorage(private val context: Context) {
             put("fileCount", task.fileCount)
             put("totalSteps", task.totalSteps)
         }
-        File(tasksDir, "${sanitizeId(task.id)}.json").writeText(json.toString())
+        val target = File(tasksDir, "${sanitizeId(task.id)}.json")
+        val tmp = File(tasksDir, "${sanitizeId(task.id)}.json.tmp")
+        try {
+            tmp.writeText(json.toString())
+            if (!tmp.renameTo(target)) {
+                // renameTo can fail on some filesystems; fall back to copy
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+        } catch (e: Exception) {
+            tmp.delete()
+            throw e
+        }
     }
 
     /* ── Read ── */
@@ -79,7 +92,8 @@ class WorkbenchTaskStorage(private val context: Context) {
                 fileCount = j.optInt("fileCount", 0),
                 totalSteps = j.optInt("totalSteps", 0)
             )
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("WorkbenchTaskStorage", "Failed to load ${file.name}", e)
             null
         }
     }

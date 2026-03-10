@@ -20,6 +20,7 @@ import com.example.link_pi.util.SecurityUtils
 import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -356,7 +357,13 @@ class ToolExecutor(
         )
     )
 
-    suspend fun execute(call: ToolCall): ToolResult = withContext(Dispatchers.IO) {
+    suspend fun execute(call: ToolCall): ToolResult {
+        return withTimeoutOrNull(60_000L) {
+            executeInternal(call)
+        } ?: ToolResult(call.toolName, false, "Error: 工具执行超时 (60s)")
+    }
+
+    private suspend fun executeInternal(call: ToolCall): ToolResult = withContext(Dispatchers.IO) {
         try {
             // Normalize argument keys to match tool parameter definitions
             val args = normalizeArgs(call.toolName, call.arguments)

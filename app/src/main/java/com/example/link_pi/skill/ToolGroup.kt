@@ -138,7 +138,8 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         UserIntent.MODIFY_APP -> {
             when (phase) {
                 AgentPhase.PLANNING -> {
-                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.NETWORK))
+                    // Planning is read-only: explore workspace, read code, plan modifications
+                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_READ, ToolGroup.APP_NAVIGATE, ToolGroup.CODING))
                 }
                 AgentPhase.GENERATION -> {
                     groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.NETWORK))
@@ -153,9 +154,8 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         }
     }
 
-    // Add Skill-level extra groups (skip during CREATE_APP Planning to keep prompt focused;
-    // MODIFY_APP Planning does real edits, so it needs extra groups like MODULE)
-    if (!(phase == AgentPhase.PLANNING && intent == UserIntent.CREATE_APP)) {
+    // Add Skill-level extra groups (skip during Planning to keep prompt focused)
+    if (!(phase == AgentPhase.PLANNING && (intent == UserIntent.CREATE_APP || intent == UserIntent.MODIFY_APP))) {
         groups.addAll(extraGroups)
     }
 

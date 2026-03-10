@@ -10,6 +10,11 @@ import java.io.File
  */
 class WorkspaceManager(private val context: Context) {
 
+    companion object {
+        /** Meta files excluded from user file listings and searches. */
+        val META_FILES = setOf("APP_INFO.json", "ARCHITECTURE.md")
+    }
+
     private val workspacesRoot: File
         get() = File(context.filesDir, "workspaces").also { it.mkdirs() }
 
@@ -261,23 +266,29 @@ class WorkspaceManager(private val context: Context) {
         val files = mutableListOf<String>()
         root.walkTopDown()
             .onEnter { it.name != ".snapshots" }
-            .filter { it.isFile && it.name != "APP_INFO.md" }.forEach { file ->
+            .filter { it.isFile && it.name !in META_FILES }.forEach { file ->
             files.add(file.relativeTo(root).path.replace("\\", "/"))
         }
         return files
     }
 
     /**
-     * Generate or update APP_INFO.md manifest in the workspace.
-     * Contains app name, version, file structure with sizes.
+     * Generate or update APP_INFO.json manifest in the workspace.
+     * Contains app name, version, description, file structure with sizes.
      */
-    fun generateManifest(appId: String, appName: String, version: Int = 1) {
+    fun generateManifest(
+        appId: String, appName: String, version: Int = 1,
+        description: String = "",
+        usedTools: List<String> = emptyList(),
+        usedBridgeApis: List<String> = emptyList(),
+        usedModules: List<String> = emptyList()
+    ) {
         val root = getWorkspaceDir(appId)
         if (!root.exists()) return
 
         val files = root.walkTopDown()
             .onEnter { it.name != ".snapshots" }
-            .filter { it.isFile && it.name != "APP_INFO.md" }
+            .filter { it.isFile && it.name !in META_FILES }
             .sortedBy { it.relativeTo(root).path }
             .toList()
 
@@ -285,59 +296,37 @@ class WorkspaceManager(private val context: Context) {
         val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
         val now = sdf.format(java.util.Date())
 
-        val sb = StringBuilder()
-        sb.appendLine("# $appName")
-        sb.appendLine()
-        sb.appendLine("- **版本**: v$version")
-        sb.appendLine("- **文件数**: ${files.size}")
-        sb.appendLine("- **总大小**: ${formatSize(totalSize)}")
-        sb.appendLine("- **更新时间**: $now")
-        sb.appendLine()
-        sb.appendLine("## 文件结构")
-        sb.appendLine()
-        sb.appendLine("```")
-        sb.appendLine(buildFileTree(root, files))
-        sb.appendLine("```")
+        val fileList = org.json.JSONArray()
+        for (f in files) {
+            val obj = org.json.JSONObject()
+            obj.put("path", f.relativeTo(root).path.replace("\\", "/"))
+            obj.put("size", formatSize(f.length()))
+            fileList.put(obj)
+        }
 
-        File(root, "APP_INFO.md").writeText(sb.toString())
+        val json = org.json.JSONObject()
+        json.put("name", appName)
+        json.put("version", version)
+        json.put("description", description)
+        json.put("fileCount", files.size)
+        json.put("totalSize", formatSize(totalSize))
+        json.put("updatedAt", now)
+        json.put("files", fileList)
+        if (usedTools.isNotEmpty()) json.put("usedTools", org.json.JSONArray(usedTools))
+        if (usedBridgeApis.isNotEmpty()) json.put("nativeBridgeApis", org.json.JSONArray(usedBridgeApis))
+        if (usedModules.isNotEmpty()) json.put("modules", org.json.JSONArray(usedModules))
+
+        File(root, "APP_INFO.json").writeText(json.toString(2))
     }
 
-    private fun buildFileTree(root: File, files: List<File>): String {
-        val sb = StringBuilder()
-        // Collect all directories
-        val dirs = mutableSetOf<String>()
-        val fileEntries = mutableListOf<Pair<String, Long>>() // path, size
-        for (f in files) {
-            val rel = f.relativeTo(root).path.replace("\\", "/")
-            fileEntries.add(rel to f.length())
-            val parent = f.parentFile
-            if (parent != null && parent != root) {
-                var d = parent
-                while (d != null && d != root) {
-                    dirs.add(d.relativeTo(root).path.replace("\\", "/"))
-                    d = d.parentFile
-                }
-            }
-        }
-
-        // Build tree lines sorted
-        data class Entry(val path: String, val isDir: Boolean, val size: Long)
-        val all = mutableListOf<Entry>()
-        for (d in dirs) all.add(Entry(d, true, 0))
-        for ((p, s) in fileEntries) all.add(Entry(p, false, s))
-        all.sortBy { it.path }
-
-        for (entry in all) {
-            val depth = entry.path.count { it == '/' }
-            val indent = "│   ".repeat(depth)
-            val name = entry.path.substringAfterLast('/')
-            if (entry.isDir) {
-                sb.appendLine("$indent├── $name/")
-            } else {
-                sb.appendLine("$indent├── $name  (${formatSize(entry.size)})")
-            }
-        }
-        return sb.toString().trimEnd()
+    /**
+     * Generate ARCHITECTURE.md — describes core files, key line ranges, and responsibilities.
+     * Called with AI-generated content.
+     */
+    fun generateArchitecture(appId: String, content: String) {
+        val root = getWorkspaceDir(appId)
+        if (!root.exists()) return
+        File(root, "ARCHITECTURE.md").writeText(content)
     }
 
     private fun formatSize(bytes: Long): String {
@@ -418,7 +407,7 @@ class WorkspaceManager(private val context: Context) {
 
         val allFiles = root.walkTopDown()
             .onEnter { it.name != ".snapshots" }
-            .filter { it.isFile && it.name != "APP_INFO.md" }
+            .filter { it.isFile && it.name !in META_FILES }
             .filter { f ->
                 fileFilterRegex?.containsMatchIn(f.name) ?: true
             }
@@ -729,26 +718,40 @@ class WorkspaceManager(private val context: Context) {
             }
 
         // Use a proper tag tokenizer that handles quoted attributes containing '>'
-        val tagTokenRegex = Regex("""</?([a-zA-Z][a-zA-Z0-9-]*)(?:\s+(?:[^>"']*|"[^"]*"|'[^']*')*)?\s*/?>|</([a-zA-Z][a-zA-Z0-9-]*)\s*>""")
-        val lines = strippedContent.lines()
-        for ((lineIdx, line) in lines.withIndex()) {
-            for (match in tagTokenRegex.findAll(line)) {
-                val raw = match.value
-                if (raw.startsWith("</")) {
-                    // Close tag
-                    val tag = (match.groupValues[1].ifBlank { match.groupValues[2] }).lowercase()
-                    val lastIdx = tagStack.indexOfLast { it.first == tag }
-                    if (lastIdx >= 0) {
-                        tagStack.removeAt(lastIdx)
-                    } else {
-                        issues.add("[错误] 第${lineIdx + 1}行: 多余的关闭标签 </$tag>")
-                    }
+        // and multi-line tags (attributes spanning multiple lines).
+        // Run on the entire stripped content, then compute line numbers from offsets.
+        // The regex: match open/close/self-closing tags. Inside quoted attrs, '>' is allowed.
+        // [^>"'] matches any char (including newlines via DOT_MATCHES_ALL equivalent) except >, ", '
+        val tagTokenRegex = Regex("""<(/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s(?:[^>"']|"[^"]*"|'[^']*')*?)?\s*/?>""")
+        // Pre-compute line start offsets for efficient line number lookup
+        val lineBreaks = mutableListOf(0) // offset of each line start
+        for ((i, ch) in strippedContent.withIndex()) {
+            if (ch == '\n') lineBreaks.add(i + 1)
+        }
+        fun offsetToLine(offset: Int): Int {
+            var lo = 0; var hi = lineBreaks.size - 1
+            while (lo < hi) {
+                val mid = (lo + hi + 1) / 2
+                if (lineBreaks[mid] <= offset) lo = mid else hi = mid - 1
+            }
+            return lo + 1 // 1-based
+        }
+
+        for (match in tagTokenRegex.findAll(strippedContent)) {
+            val raw = match.value
+            val lineNum = offsetToLine(match.range.first)
+            val isClose = match.groupValues[1] == "/"
+            val tag = match.groupValues[2].lowercase()
+            if (isClose) {
+                val lastIdx = tagStack.indexOfLast { it.first == tag }
+                if (lastIdx >= 0) {
+                    tagStack.removeAt(lastIdx)
                 } else {
-                    // Open tag (or self-closing)
-                    val tag = match.groupValues[1].lowercase()
-                    if (tag !in selfClosing && !raw.endsWith("/>")) {
-                        tagStack.add(tag to (lineIdx + 1))
-                    }
+                    issues.add("[错误] 第${lineNum}行: 多余的关闭标签 </$tag>")
+                }
+            } else {
+                if (tag !in selfClosing && !raw.endsWith("/>")) {
+                    tagStack.add(tag to lineNum)
                 }
             }
         }
@@ -819,6 +822,24 @@ class WorkspaceManager(private val context: Context) {
     }
 
     // ── Security ──
+
+    /**
+     * Delete workspace directories that haven't been modified in [maxAgeDays] days
+     * and trim snapshots in each remaining workspace to [maxSnapshotsPerFile].
+     * Call from a background thread (e.g. ViewModel init).
+     */
+    fun cleanupStaleWorkspaces(maxAgeDays: Int = 30) {
+        try {
+            val cutoff = System.currentTimeMillis() - maxAgeDays.toLong() * 24 * 60 * 60 * 1000
+            val dirs = workspacesRoot.listFiles()?.filter { it.isDirectory } ?: return
+            for (dir in dirs) {
+                val newest = dir.walkTopDown().filter { it.isFile }.maxOfOrNull { it.lastModified() } ?: 0L
+                if (newest < cutoff) {
+                    dir.deleteRecursively()
+                }
+            }
+        } catch (_: Exception) { /* best-effort */ }
+    }
 
     /** Sanitize app ID to prevent directory traversal. */
     private fun sanitizeId(id: String): String {

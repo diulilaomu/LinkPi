@@ -34,7 +34,8 @@ object PromptAssembler {
         memorySnapshot: String?,
         aiSelection: CapabilitySelection? = null,
         workspaceSnapshot: String? = null,
-        injectedPrompts: List<String> = emptyList()
+        injectedPrompts: List<String> = emptyList(),
+        fast: Boolean = false
     ): String {
         // For app GENERATION phase, merge AI selections with base groups
         val groups = if (phase == AgentPhase.GENERATION && intent.needsApp() && aiSelection != null && !aiSelection.isEmpty()) {
@@ -46,7 +47,12 @@ object PromptAssembler {
             resolveToolGroups(intent, phase, skill.extraToolGroups)
         }
 
-        val tools = allTools.filter { val g = TOOL_GROUP_MAP[it.name]; g == null || g in groups }
+        // In FAST generation mode, AI outputs structured file blocks directly — no file tools needed
+        val tools = if (fast && phase == AgentPhase.GENERATION) {
+            emptyList()
+        } else {
+            allTools.filter { val g = TOOL_GROUP_MAP[it.name]; g == null || g in groups }
+        }
         val toolDescriptions = tools.joinToString("\n") { it.toPromptString() }
 
         // Bridge/CDN docs: for generation, use AI selections merged with skill defaults
@@ -60,7 +66,7 @@ object PromptAssembler {
         val cdnDocs = if (needFullDocs)
             CdnDocs.build(effectiveCdnGroups) else ""
 
-        val workflow = BuiltInSkills.resolveWorkflow(intent, phase)
+        val workflow = BuiltInSkills.resolveWorkflow(intent, phase, fast)
 
         return buildString {
             appendLine(skill.systemPrompt)
@@ -72,11 +78,14 @@ object PromptAssembler {
                     appendLine()
                 }
             }
-            appendLine()
-            appendLine(BuiltInSkills.AGENT_MODE_HEADER)
-            appendLine()
-            appendLine("### 可用工具")
-            appendLine(toolDescriptions)
+            // FAST generation: skip agent mode header + tool list (AI uses structured file output, not tool calls)
+            if (!(fast && phase == AgentPhase.GENERATION)) {
+                appendLine()
+                appendLine(BuiltInSkills.AGENT_MODE_HEADER)
+                appendLine()
+                appendLine("### 可用工具")
+                appendLine(toolDescriptions)
+            }
 
             if (intent == UserIntent.CREATE_APP && phase == AgentPhase.PLANNING) {
                 appendLine()
@@ -147,5 +156,21 @@ object PromptAssembler {
         }
 
         return CapabilitySelection(toolGroups, bridgeGroups, cdnGroups)
+    }
+
+    /** Generation mode determined by AI during planning. */
+    enum class GenerationMode { FAST, FULL }
+
+    /**
+     * Parse `<generation_mode>FAST|FULL</generation_mode>` from planning response.
+     * Defaults to FULL if not found (safe fallback).
+     */
+    fun parseGenerationMode(planningResponse: String): GenerationMode {
+        val regex = Regex("""<generation_mode>\s*(FAST|FULL)\s*</generation_mode>""", RegexOption.IGNORE_CASE)
+        val match = regex.find(planningResponse) ?: return GenerationMode.FULL
+        return when (match.groupValues[1].uppercase()) {
+            "FAST" -> GenerationMode.FAST
+            else -> GenerationMode.FULL
+        }
     }
 }

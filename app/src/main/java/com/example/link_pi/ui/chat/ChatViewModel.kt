@@ -87,7 +87,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val userPrompt: String,
         val title: String,
         val modelId: String,
-        val enableThinking: Boolean
+        val enableThinking: Boolean,
+        val appId: String? = null
     )
 
     private val _pendingWorkbench = MutableStateFlow<WorkbenchRequest?>(null)
@@ -123,6 +124,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _error.value = null
         _agentSteps.value = emptyList()
         _pendingAttachments.value = emptyList()
+        _pendingWorkbench.value = null
         currentMiniApp = null
     }
 
@@ -135,6 +137,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _error.value = null
         _agentSteps.value = emptyList()
         _pendingAttachments.value = emptyList()
+        _pendingWorkbench.value = null
         currentMiniApp = null
         viewModelScope.launch {
             val msgs = withContext(Dispatchers.IO) { conversationStorage.loadMessages(conversationId) }
@@ -263,32 +266,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Quick local intent check — redirect CREATE_APP to workbench confirmation
+        // Quick local intent check — redirect app intents to workbench
         val hasActiveWorkspace = toolExecutor.latestAppHint != null || currentMiniApp != null
         val localIntent = IntentClassifier.classifyLocal(userInput, hasActiveWorkspace)
-        if (localIntent == UserIntent.CREATE_APP) {
+        if (localIntent == UserIntent.CREATE_APP || localIntent == UserIntent.MODIFY_APP) {
             val title = userInput.take(30).replace("\n", " ").trim()
+            val existingAppId = if (localIntent == UserIntent.MODIFY_APP) {
+                toolExecutor.latestAppHint ?: currentMiniApp?.id
+            } else null
             _pendingWorkbench.value = WorkbenchRequest(
                 userPrompt = userInput,
-                title = title,
+                title = if (localIntent == UserIntent.MODIFY_APP) "修改：$title" else title,
                 modelId = aiConfig.activeModelId,
-                enableThinking = _deepThinking.value
+                enableThinking = _deepThinking.value,
+                appId = existingAppId
             )
-            // Add a system message to indicate the redirect
-            val hintMessage = ChatMessage(
-                id = UUID.randomUUID().toString(),
-                role = "assistant",
-                content = "检测到应用创建请求，已准备工作台任务。请确认后开始生成。"
-            )
-            _messages.update { it + hintMessage }
-            saveCurrentConversation()
             return
         }
 
         launchOrchestrator()
     }
 
-    /** Dismiss the workbench confirmation card without acting. */
+    /** Dismiss the workbench confirmation card. */
     fun dismissWorkbench() {
         _pendingWorkbench.value = null
     }
@@ -299,9 +298,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _pendingWorkbench.value = null
         return req
     }
-
-    /** Dismiss workbench card and run the normal orchestrator (called from UI). */
-    fun launchOrchestratorPublic() = launchOrchestrator()
 
     private fun launchOrchestrator() {
         viewModelScope.launch {
@@ -388,8 +384,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (lastUserIdx < 0) return
 
         val userInput = msgs[lastUserIdx].content
-        // Remove the last assistant message
-        _messages.update { it.filterIndexed { idx, _ -> idx != lastAssistantIdx } }
+        val messageToRemove = msgs[lastAssistantIdx]
+        // Remove the last assistant message by identity, not index
+        _messages.update { current -> current.filter { it !== messageToRemove } }
         // Re-send
         _error.value = null
         _agentSteps.value = emptyList()
@@ -458,14 +455,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val apiMessages = mutableListOf<Map<String, String>>()
         apiMessages.add(mapOf("role" to "system", "content" to _activeSkill.value.systemPrompt))
 
+        // Snapshot messages once for consistency
+        val msgs = _messages.value
+
         // Inject context awareness — help AI understand what the user is likely referring to
-        val contextHint = buildContextHint()
+        val contextHint = buildContextHint(msgs)
         if (contextHint.isNotBlank()) {
             apiMessages.add(mapOf("role" to "system", "content" to contextHint))
         }
 
         // Keep only recent messages to avoid token overflow
-        val recentMessages = _messages.value.takeLast(20)
+        val recentMessages = msgs.takeLast(20)
 
         for (msg in recentMessages) {
             val content = if (msg.role == "assistant" && msg.miniApp != null) {
@@ -498,11 +498,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Build a compact context hint — just key facts, no fluff.
      */
-    private fun buildContextHint(): String {
+    private fun buildContextHint(msgs: List<ChatMessage>): String {
         val parts = mutableListOf<String>()
 
         // Last app in this conversation — highest priority reference
-        val lastAppMsg = _messages.value.lastOrNull { it.miniApp != null }
+        val lastAppMsg = msgs.lastOrNull { it.miniApp != null }
         val lastApp = lastAppMsg?.miniApp
         if (lastApp != null) {
             parts.add("最近应用: ${lastApp.name}|${lastApp.id}")
@@ -513,8 +513,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (app.id != lastApp?.id) parts.add("运行中: ${app.name}|${app.id}")
         }
 
-        // Saved apps — just names and IDs, compact
-        val savedApps = miniAppStorage.loadAll()
+        // Saved apps — just names and IDs, compact (limit to 10 most recent)
+        val savedApps = miniAppStorage.loadAll().take(10)
         if (savedApps.isNotEmpty()) {
             val list = savedApps.joinToString("; ") { "${it.name}|${it.id}" }
             parts.add("已保存(${ savedApps.size}): $list")

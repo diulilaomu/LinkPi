@@ -11,6 +11,9 @@ import java.io.BufferedReader
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+private const val MAX_RETRIES = 3
+private val BACKOFF_MS = longArrayOf(2_000, 4_000, 8_000)
+
 data class ChatResponse(
     val content: String,
     val thinkingContent: String = ""
@@ -18,8 +21,17 @@ data class ChatResponse(
 
 class AiService(private val config: AiConfig) {
 
+    /**
+     * When set, all API calls use this model config instead of config.activeModel.
+     * This enables concurrent task execution without global config races.
+     */
+    var modelOverride: ModelConfig? = null
+
+    /** Effective model config: override if set, otherwise active from AiConfig. */
+    private val effectiveModel: ModelConfig get() = modelOverride ?: config.activeModel
+
     /** The active model's configured max_tokens ceiling. */
-    val modelMaxTokens: Int get() = config.activeModel.maxTokens
+    val modelMaxTokens: Int get() = effectiveModel.maxTokens
 
     companion object {
         private const val MAX_REASONING_CHARS = 12_000
@@ -39,9 +51,9 @@ class AiService(private val config: AiConfig) {
     /** Convenience method — returns content string only (for backward compat). */
     suspend fun chat(
         messages: List<Map<String, String>>,
-        maxTokens: Int = config.activeModel.maxTokens,
-        temperature: Double = config.activeModel.temperature,
-        enableThinking: Boolean = config.activeModel.enableThinking
+        maxTokens: Int = effectiveModel.maxTokens,
+        temperature: Double = effectiveModel.temperature,
+        enableThinking: Boolean = effectiveModel.enableThinking
     ): String = chatFull(messages, maxTokens, temperature, enableThinking).content
 
     /** Single-prompt shorthand (e.g. for intent classification). Always disables thinking. */
@@ -53,16 +65,17 @@ class AiService(private val config: AiConfig) {
     /** Full response including reasoning_content when deep thinking is enabled. */
     suspend fun chatFull(
         messages: List<Map<String, String>>,
-        maxTokens: Int = config.activeModel.maxTokens,
-        temperature: Double = config.activeModel.temperature,
-        enableThinking: Boolean = config.activeModel.enableThinking
+        maxTokens: Int = effectiveModel.maxTokens,
+        temperature: Double = effectiveModel.temperature,
+        enableThinking: Boolean = effectiveModel.enableThinking
     ): ChatResponse = withContext(Dispatchers.IO) {
-        val endpoint = normalizeEndpoint(config.apiEndpoint)
+        val model = effectiveModel
+        val endpoint = normalizeEndpoint(model.endpoint)
 
         val jsonMessages = buildJsonMessages(messages)
 
         val requestBody = JSONObject().apply {
-            put("model", config.modelName)
+            put("model", model.model)
             put("messages", jsonMessages)
             put("temperature", temperature)
             put("max_tokens", maxTokens)
@@ -73,25 +86,37 @@ class AiService(private val config: AiConfig) {
 
         val request = Request.Builder()
             .url(endpoint)
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
+            .addHeader("Authorization", "Bearer ${model.apiKey}")
             .addHeader("Content-Type", "application/json")
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        val response = client.newCall(request).execute()
-        val body = response.body?.string() ?: throw IOException("Empty response")
+        var lastException: IOException? = null
+        for (attempt in 0..MAX_RETRIES) {
+            val response = client.newCall(request).execute()
+            response.use { resp ->
+                val body = resp.body?.string() ?: throw IOException("Empty response")
 
-        if (!response.isSuccessful) {
-            throw IOException("API ${response.code} ($endpoint): $body")
+                if (resp.isSuccessful) {
+                    val json = JSONObject(body)
+                    val message = json.getJSONArray("choices")
+                        .getJSONObject(0)
+                        .getJSONObject("message")
+                    val content = if (message.isNull("content")) "" else message.optString("content", "")
+                    val thinking = if (message.isNull("reasoning_content")) "" else message.optString("reasoning_content", "")
+                    return@withContext ChatResponse(content, thinking)
+                }
+
+                val code = resp.code
+                if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                    lastException = IOException("API $code ($endpoint): $body")
+                    Thread.sleep(BACKOFF_MS[attempt])
+                } else {
+                    throw IOException("API $code ($endpoint): $body")
+                }
+            }
         }
-
-        val json = JSONObject(body)
-        val message = json.getJSONArray("choices")
-            .getJSONObject(0)
-            .getJSONObject("message")
-        val content = if (message.isNull("content")) "" else message.optString("content", "")
-        val thinking = if (message.isNull("reasoning_content")) "" else message.optString("reasoning_content", "")
-        ChatResponse(content, thinking)
+        throw lastException ?: IOException("Unexpected retry exhaustion")
     }
 
     /**
@@ -100,18 +125,19 @@ class AiService(private val config: AiConfig) {
      */
     suspend fun chatStream(
         messages: List<Map<String, String>>,
-        maxTokens: Int = config.activeModel.maxTokens,
-        temperature: Double = config.activeModel.temperature,
-        enableThinking: Boolean = config.activeModel.enableThinking,
+        maxTokens: Int = effectiveModel.maxTokens,
+        temperature: Double = effectiveModel.temperature,
+        enableThinking: Boolean = effectiveModel.enableThinking,
         onThinkingDelta: (accumulated: String) -> Unit = {},
         onContentDelta: (accumulated: String) -> Unit = {}
     ): ChatResponse = withContext(Dispatchers.IO) {
-        val endpoint = normalizeEndpoint(config.apiEndpoint)
+        val model = effectiveModel
+        val endpoint = normalizeEndpoint(model.endpoint)
 
         val jsonMessages = buildJsonMessages(messages)
 
         val requestBody = JSONObject().apply {
-            put("model", config.modelName)
+            put("model", model.model)
             put("messages", jsonMessages)
             put("temperature", temperature)
             put("max_tokens", maxTokens)
@@ -123,23 +149,37 @@ class AiService(private val config: AiConfig) {
 
         val request = Request.Builder()
             .url(endpoint)
-            .addHeader("Authorization", "Bearer ${config.apiKey}")
+            .addHeader("Authorization", "Bearer ${model.apiKey}")
             .addHeader("Content-Type", "application/json")
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            val body = response.body?.string() ?: ""
-            throw IOException("API ${response.code} ($endpoint): $body")
+        var successResponse: okhttp3.Response? = null
+        var lastException: IOException? = null
+        for (attempt in 0..MAX_RETRIES) {
+            val resp = client.newCall(request).execute()
+            if (resp.isSuccessful) {
+                successResponse = resp
+                break
+            }
+            val code = resp.code
+            val body = resp.use { it.body?.string() ?: "" }
+            if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                lastException = IOException("API $code ($endpoint): $body")
+                Thread.sleep(BACKOFF_MS[attempt])
+                continue
+            }
+            throw IOException("API $code ($endpoint): $body")
         }
+        val safeResponse = successResponse
+            ?: throw (lastException ?: IOException("Unexpected retry exhaustion"))
 
         val thinkingBuf = StringBuilder()
         val contentBuf = StringBuilder()
         var pendingThinkingChars = 0
         var pendingContentChars = 0
 
-        val reader: BufferedReader = response.body?.byteStream()?.bufferedReader()
+        val reader: BufferedReader = safeResponse.body?.byteStream()?.bufferedReader()
             ?: throw IOException("Empty stream body")
 
         var sseError: String? = null

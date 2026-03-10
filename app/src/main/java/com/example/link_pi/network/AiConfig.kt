@@ -14,23 +14,30 @@ import org.json.JSONObject
  * Backward-compatible: migrates legacy single-model config on first run.
  */
 class AiConfig(context: Context) {
-    private val prefs: SharedPreferences = try {
-        val masterKey = MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        EncryptedSharedPreferences.create(
-            context,
-            "ai_config_encrypted",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    } catch (e: Exception) {
-        android.util.Log.e("AiConfig", "EncryptedSharedPreferences failed, falling back to plain storage", e)
-        context.getSharedPreferences("ai_config", Context.MODE_PRIVATE)
-    }
+    /** True if encrypted storage failed and plain SharedPreferences is used. */
+    val isUsingPlainStorage: Boolean
+
+    private val prefs: SharedPreferences
 
     init {
+        var plain = false
+        prefs = try {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            EncryptedSharedPreferences.create(
+                context,
+                "ai_config_encrypted",
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("AiConfig", "EncryptedSharedPreferences failed, falling back to plain storage", e)
+            plain = true
+            context.getSharedPreferences("ai_config", Context.MODE_PRIVATE)
+        }
+        isUsingPlainStorage = plain
         migrateFromPlainPrefs(context)
         migrateFromLegacySingle()
     }

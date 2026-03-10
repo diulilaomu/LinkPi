@@ -4,6 +4,7 @@ import com.example.link_pi.bridge.RuntimeErrorCollector
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.data.model.Skill
 import com.example.link_pi.data.model.SkillMode
+import com.example.link_pi.miniapp.FileBlockParser
 import com.example.link_pi.miniapp.MiniAppParser
 import com.example.link_pi.network.AiService
 import com.example.link_pi.network.ChatResponse
@@ -47,6 +48,7 @@ class AgentOrchestrator(
         skill: Skill,
         enableThinking: Boolean = false,
         injectionSkills: List<Skill> = emptyList(),
+        overrideIntent: UserIntent? = null,
         onStep: suspend (AgentStep) -> Unit,
         onStepSync: ((AgentStep) -> Unit)? = null
     ): OrchestratorResult {
@@ -63,21 +65,30 @@ class AgentOrchestrator(
             }
         }
 
-        // Assign a fresh workspace ID; may be overridden by open_app_workspace tool
-        toolExecutor.currentAppId = UUID.randomUUID().toString()
+        // Assign a fresh workspace ID only if not pre-configured by caller (e.g. WorkbenchEngine)
+        if (toolExecutor.currentAppId == "default") {
+            toolExecutor.currentAppId = UUID.randomUUID().toString()
+        }
         var usedFileTools = false
         var latestThinking = ""
+        var consecutiveFailedRounds = 0   // Track rounds where ALL file-tool calls failed
 
-        // ── Intent classification via AI ──
-        onStep(AgentStep(StepType.THINKING, "正在分析请求..."))
+        // ── Intent classification ──
         val userMessage = messages.lastOrNull { it["role"] == "user" }?.get("content") ?: ""
-        val hasActiveWorkspace = toolExecutor.latestAppHint != null
-        val intent = try {
-            IntentClassifier.classify(userMessage, hasActiveWorkspace, skill, aiService)
-        } catch (_: Exception) {
-            UserIntent.CONVERSATION
+        val intent = if (overrideIntent != null) {
+            onStep(AgentStep(StepType.THINKING, "意图: $overrideIntent (预设)"))
+            overrideIntent
+        } else {
+            onStep(AgentStep(StepType.THINKING, "正在分析请求..."))
+            val hasActiveWorkspace = toolExecutor.latestAppHint != null
+            val classified = try {
+                IntentClassifier.classify(userMessage, hasActiveWorkspace, skill, aiService)
+            } catch (_: Exception) {
+                UserIntent.CONVERSATION
+            }
+            onStep(AgentStep(StepType.THINKING, "意图识别: $classified"))
+            classified
         }
-        onStep(AgentStep(StepType.THINKING, "意图识别: $intent"))
 
         // ── Resolve injected skill prompts for this intent ──
         // Cap total injected prompt size to 4KB to prevent context overflow
@@ -104,6 +115,8 @@ class AgentOrchestrator(
 
         // Track AI's capability selection from planning
         var aiSelection: PromptAssembler.CapabilitySelection? = null
+        // Track generation mode from planning (FAST skips tool-call loops)
+        var generationMode = PromptAssembler.GenerationMode.FULL
 
         // Re-inject images into last user message so the first planning call can see them
         if (savedImages != null && lastUserIdx >= 0) {
@@ -191,14 +204,16 @@ class AgentOrchestrator(
                     onStep(AgentStep(StepType.THINKING, stripped.take(200)))
                     messages.add(mapOf("role" to "assistant", "content" to response))
                 }
-                // Parse AI's capability selection and clean it from context
+                // Parse AI's capability selection and generation mode, then clean from context
                 if (intent.needsApp()) {
                     aiSelection = PromptAssembler.parseCapabilitySelection(response)
-                    // Strip <capability_selection> block from messages to avoid confusing Generation
+                    generationMode = PromptAssembler.parseGenerationMode(response)
+                    // Strip <capability_selection> and <generation_mode> blocks from messages
                     val lastAssistantIdx = messages.indexOfLast { it["role"] == "assistant" }
                     if (lastAssistantIdx >= 0) {
                         val cleaned = messages[lastAssistantIdx]["content"]!!
                             .replace(Regex("<capability_selection>[\\s\\S]*?</capability_selection>"), "")
+                            .replace(Regex("<generation_mode>[\\s\\S]*?</generation_mode>"), "")
                             .trim()
                         messages[lastAssistantIdx] = mapOf("role" to "assistant", "content" to cleaned)
                     }
@@ -215,6 +230,7 @@ class AgentOrchestrator(
 
             val resultParts = StringBuilder()
             var hasFailure = false
+            var allEditsFailed = true // Track if every file-edit tool in this round failed
             for (call in toolCalls) {
                 if (call.toolName in FILE_TOOLS) usedFileTools = true
 
@@ -222,7 +238,11 @@ class AgentOrchestrator(
                     call.arguments.entries.joinToString(", ") { "${it.key}=${it.value.take(80)}" }))
 
                 val result = toolExecutor.execute(call)
-                if (!result.success) hasFailure = true
+                if (!result.success) {
+                    hasFailure = true
+                } else if (call.toolName in FILE_TOOLS) {
+                    allEditsFailed = false  // At least one file tool succeeded
+                }
 
                 onStep(AgentStep(StepType.TOOL_RESULT,
                     if (result.success) "✓ ${call.toolName}" else "✗ ${call.toolName}",
@@ -232,9 +252,24 @@ class AgentOrchestrator(
                 resultParts.appendLine(result.result)
                 resultParts.appendLine("</tool_result>")
             }
+
+            // Track consecutive rounds where file edits all failed
+            val hadFileEdits = toolCalls.any { it.toolName in FILE_TOOLS }
+            if (hadFileEdits && allEditsFailed) {
+                consecutiveFailedRounds++
+            } else if (hadFileEdits) {
+                consecutiveFailedRounds = 0
+            }
+
             // When a tool fails, add recovery guidance
             if (hasFailure) {
-                resultParts.appendLine("\n[系统] 工具调用失败。请仔细阅读错误信息，修正参数后重试。注意：open_app_workspace 的 app_id 必须是 list_saved_apps 返回的实际 UUID 值。")
+                if (consecutiveFailedRounds >= 3) {
+                    // Circuit breaker: force AI to switch strategy
+                    resultParts.appendLine("\n[系统] ⚠ 连续 $consecutiveFailedRounds 轮文件修改失败。请立即更换策略：对该文件使用 write_file 整体重写，不要再尝试 replace_in_file。")
+                    onStep(AgentStep(StepType.THINKING, "连续修改失败，强制切换策略", "第 $consecutiveFailedRounds 轮"))
+                } else {
+                    resultParts.appendLine("\n[系统] 工具调用失败。请仔细阅读错误信息，修正参数后重试。注意：open_app_workspace 的 app_id 必须是 list_saved_apps 返回的实际 UUID 值。replace_in_file 连续失败时改用 replace_lines 或 write_file。")
+                }
             }
             messages.add(mapOf("role" to "user", "content" to resultParts.toString()))
         }
@@ -259,11 +294,12 @@ class AgentOrchestrator(
         }
 
         // ── Phase 2: Generation (full token budget) — only for app intents ──
-        onStep(AgentStep(StepType.THINKING, "正在生成应用...", "全量生成"))
+        val isFast = generationMode == PromptAssembler.GenerationMode.FAST && intent == UserIntent.CREATE_APP
+        onStep(AgentStep(StepType.THINKING, "正在生成应用...", if (isFast) "快速生成" else "全量生成"))
 
         // Rebuild system prompt for GENERATION phase with AI's capability selections
         val genWorkspaceSnapshot = buildWorkspaceSnapshot()
-        val generationPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, genWorkspaceSnapshot, injectedPrompts)
+        val generationPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, genWorkspaceSnapshot, injectedPrompts, fast = isFast)
 
         // Compress context
         val compressedMessages = compressContext(messages)
@@ -274,18 +310,70 @@ class AgentOrchestrator(
             compressedMessages[compSysIdx] = mapOf("role" to "system", "content" to generationPrompt)
         }
 
+        // ── FAST path: single-pass generation, no tool calls ──
+        if (isFast) {
+            val fastInstruction = "根据上方的架构规划，现在生成完整应用。使用 <file path=\"...\">content</file> 格式输出所有文件。输出完整、可运行的代码，绝对不要截断或省略。"
+            compressedMessages.add(mutableMapOf("role" to "user", "content" to fastInstruction))
+
+            var fastResp = callAi(compressedMessages, GENERATION_TOKENS, enableThinking, "Generation", onStep, onStepSync)
+            var fastResponse = fastResp.content
+
+            if (fastResponse.isBlank() && enableThinking) {
+                fastResp = callAi(compressedMessages, GENERATION_TOKENS, false, "Generation重试", onStep, onStepSync)
+                fastResponse = fastResp.content
+            }
+            if (fastResponse.isBlank() && fastResp.thinkingContent.length > 200) {
+                fastResponse = fastResp.thinkingContent
+            }
+            if (fastResp.thinkingContent.isNotBlank()) {
+                latestThinking = fastResp.thinkingContent
+            }
+
+            // Parse structured file output
+            val parsedFiles = FileBlockParser.parseFiles(fastResponse)
+            if (parsedFiles.isNotEmpty()) {
+                val wm = toolExecutor.workspaceManager
+                val appId = toolExecutor.currentAppId
+                for (f in parsedFiles) {
+                    wm.writeFile(appId, f.path, f.content)
+                }
+                usedFileTools = true
+                onStep(AgentStep(StepType.THINKING, "已写入 ${parsedFiles.size} 个文件", parsedFiles.joinToString(", ") { it.path }))
+
+                // Run self-check (validate HTML + runtime errors)
+                val fastGenPrompt = PromptAssembler.build(skill, intent, AgentPhase.GENERATION, toolExecutor.toolDefs, planningSnapshot, aiSelection, buildWorkspaceSnapshot(), injectedPrompts)
+                val wsApp = runPostGenerationCheck(compressedMessages, appId, fastGenPrompt, onStep, onStepSync)
+                if (wsApp != null) {
+                    onStep(AgentStep(StepType.FINAL_RESPONSE, "快速生成完成", wsApp.name))
+                    return cleanResult(fastResponse, wsApp, toolIterations + 1, latestThinking)
+                }
+                // Fallback: build workspace app directly
+                val fallbackApp = buildWorkspaceApp(appId, fastResponse)
+                if (fallbackApp != null) {
+                    onStep(AgentStep(StepType.FINAL_RESPONSE, "快速生成完成", fallbackApp.name))
+                    return cleanResult(fastResponse, fallbackApp, toolIterations + 1, latestThinking)
+                }
+            }
+
+            // FAST parse failed — fall through to extract HTML inline or return text
+            val miniApp = MiniAppParser.extractMiniApp(fastResponse)
+            if (miniApp != null) {
+                onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", miniApp.name))
+                return cleanResult(fastResponse, miniApp, toolIterations + 1, latestThinking)
+            }
+            onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
+            return cleanResult(fastResponse, null, toolIterations + 1, latestThinking)
+        }
+
+        // ── FULL path: multi-round tool call generation ──
         // Add generation instruction — references the plan from Planning phase
         // Check intent BEFORE usedFileTools, so MODIFY_APP gets correct instruction even when file tools were used in planning
         val genInstruction = when {
-            intent == UserIntent.MODIFY_APP -> "根据上方的规划，现在对现有应用应用所有修改。必须先 read_workspace_file 读取当前代码（不要凭记忆），再用 replace_in_file 或 write_file 修改。修改完成后用 validate_html 检查。确保应用完整可运行。"
+            intent == UserIntent.MODIFY_APP -> "根据上方的规划，现在对现有应用执行所有修改。规则：\n1. 修改前必须先 read_workspace_file 读取最新代码\n2. 用 replace_in_file 精确修改（old_text 必须与文件内容完全匹配）\n3. replace_in_file 失败一次后，改用 replace_lines（按行号替换）\n4. 如果修改超过文件 60% 的内容，直接用 write_file 整体重写\n5. 所有修改完成后用 validate_html 检查"
             usedFileTools -> "根据上方的架构规划，继续创建应用。使用文件工具（create_file、write_file 等）分别写入每个文件。确保 index.html 为入口文件。生成完整代码——绝对不要截断。所有文件写入完成后，用 validate_html 验证 index.html。"
             else -> "根据上方的架构规划，现在生成完整应用。输出方式：\n1. 单文件：在 ```html 代码块中输出完整 HTML 代码\n2. 多文件：使用文件工具（create_file）分别创建 HTML、CSS、JS 文件\n生成完整、可运行的代码。绝对不要截断或省略。"
         }
-        val genInstructionMsg = if (savedImages != null) {
-            mutableMapOf("role" to "user", "content" to genInstruction, "_images" to savedImages)
-        } else {
-            mutableMapOf("role" to "user", "content" to genInstruction)
-        }
+        val genInstructionMsg = mutableMapOf("role" to "user", "content" to genInstruction)
         compressedMessages.add(genInstructionMsg)
 
         var genResp = callAi(compressedMessages, GENERATION_TOKENS, enableThinking, "Generation", onStep, onStepSync)
@@ -332,6 +420,7 @@ class AgentOrchestrator(
             // Continue iterating if more tool calls are expected
             genMessages.add(mapOf("role" to "user", "content" to resultParts.toString()))
             var extraIterations = 0
+            var genConsecFails = 0
             while (extraIterations < MAX_TOOL_ITERATIONS) {
                 extraIterations++
                 val contResp = callAi(genMessages, GENERATION_TOKENS, enableThinking, "Generation继续", onStep, onStepSync)
@@ -360,9 +449,11 @@ class AgentOrchestrator(
                 }
                 genMessages.add(mapOf("role" to "assistant", "content" to contResponse))
                 val contResults = StringBuilder()
+                var contAllFailed = true
                 for (call in contToolCalls) {
                     if (call.toolName in FILE_TOOLS) usedFileTools = true
                     val result = toolExecutor.execute(call)
+                    if (result.success && call.toolName in FILE_TOOLS) contAllFailed = false
                     onStep(AgentStep(StepType.TOOL_CALL, "调用 ${call.toolName}",
                         call.arguments.entries.joinToString(", ") { "${it.key}=${it.value.take(80)}" }))
                     onStep(AgentStep(StepType.TOOL_RESULT,
@@ -371,6 +462,15 @@ class AgentOrchestrator(
                     contResults.appendLine("<tool_result name=\"${call.toolName}\" success=\"${result.success}\">")
                     contResults.appendLine(result.result)
                     contResults.appendLine("</tool_result>")
+                }
+                val contHadEdits = contToolCalls.any { it.toolName in FILE_TOOLS }
+                if (contHadEdits && contAllFailed) {
+                    genConsecFails++
+                    if (genConsecFails >= 3) {
+                        contResults.appendLine("\n[系统] ⚠ 连续 $genConsecFails 轮文件修改失败。请立即更换策略：对该文件使用 write_file 整体重写，不要再尝试 replace_in_file。")
+                    }
+                } else if (contHadEdits) {
+                    genConsecFails = 0
                 }
                 genMessages.add(mapOf("role" to "user", "content" to contResults.toString()))
             }
@@ -554,9 +654,10 @@ class AgentOrchestrator(
 
         // Generate/update manifest
         val version = if (existingApp != null) {
-            val vRegex = Regex("v(\\d+)")
-            val oldManifest = try { java.io.File(wm.getWorkspacePath(appId), "APP_INFO.md").readText() } catch (_: Exception) { "" }
-            val oldVer = vRegex.find(oldManifest)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val oldVer = try {
+                val text = java.io.File(wm.getWorkspacePath(appId), "APP_INFO.json").readText()
+                org.json.JSONObject(text).optInt("version", 0)
+            } catch (_: Exception) { 0 }
             oldVer + 1
         } else 1
         wm.generateManifest(appId, name, version)
@@ -676,19 +777,20 @@ class AgentOrchestrator(
     /** 构建当前工作区快照，注入到系统提示让 AI 感知工作区状态 */
     private fun buildWorkspaceSnapshot(): String {
         val appId = toolExecutor.currentAppId
-        val hasFiles = toolExecutor.workspaceManager.hasFiles(appId)
+        val wm = toolExecutor.workspaceManager
+        val hasFiles = wm.hasFiles(appId)
         val savedApps = toolExecutor.miniAppStorage.loadAll()
         val existingApp = savedApps.find { it.id == appId }
 
         // 检查 latestAppHint 指向的上一轮应用（用户可能要修改它）
         val hintId = toolExecutor.latestAppHint
         val hintApp = if (hintId != null && hintId != appId) savedApps.find { it.id == hintId } else null
-        val hintHasFiles = hintId != null && hintId != appId && toolExecutor.workspaceManager.hasFiles(hintId)
+        val hintHasFiles = hintId != null && hintId != appId && wm.hasFiles(hintId)
 
         return buildString {
             appendLine("### 当前工作区状态")
             if (hasFiles) {
-                val files = toolExecutor.workspaceManager.listFiles(appId, "")
+                val files = wm.listFiles(appId, "")
                 if (existingApp != null) {
                     appendLine("应用: \"${existingApp.name}\" (app_id=${appId}, 已保存)")
                 } else {
@@ -696,9 +798,43 @@ class AgentOrchestrator(
                 }
                 appendLine("文件列表:")
                 appendLine(files)
+
+                // ── 预注入代码上下文（减少修改场景的探索性工具调用）──
+                // 1. ARCHITECTURE.md — 文件职责、关键行号、数据流
+                val archFile = java.io.File(wm.getWorkspacePath(appId), "ARCHITECTURE.md")
+                if (archFile.exists()) {
+                    val archContent = archFile.readText().take(2000)
+                    appendLine()
+                    appendLine("### 架构概览 (ARCHITECTURE.md)")
+                    appendLine(archContent)
+                }
+
+                // 2. 每个源文件的代码摘要（前30行 + 行数），总量上限 4000 字符
+                val allFiles = wm.getAllFiles(appId)
+                val previewBuilder = StringBuilder()
+                for (path in allFiles) {
+                    if (previewBuilder.length > 4000) break
+                    try {
+                        val content = wm.readEntryFile(appId, path) ?: continue
+                        val lines = content.lines()
+                        val preview = lines.take(30).joinToString("\n")
+                        val suffix = if (lines.size > 30) "\n... (共 ${lines.size} 行)" else ""
+                        previewBuilder.appendLine()
+                        previewBuilder.appendLine("#### $path (${lines.size} 行)")
+                        previewBuilder.appendLine("```")
+                        previewBuilder.appendLine(preview)
+                        if (suffix.isNotBlank()) previewBuilder.appendLine(suffix)
+                        previewBuilder.appendLine("```")
+                    } catch (_: Exception) { }
+                }
+                if (previewBuilder.isNotBlank()) {
+                    appendLine()
+                    appendLine("### 代码预览（每文件前30行，修改时仍需 read_workspace_file 获取精确行号）")
+                    append(previewBuilder)
+                }
             } else if (hintHasFiles) {
                 // 当前工作区为空但有上一轮的应用提示
-                val hintFiles = toolExecutor.workspaceManager.listFiles(hintId!!, "")
+                val hintFiles = wm.listFiles(hintId!!, "")
                 appendLine("当前工作区为空（新轮次）")
                 appendLine("上一轮操作的应用: \"${hintApp?.name ?: "未知"}\" (app_id=${hintId})")
                 appendLine("该应用文件列表:")
