@@ -13,11 +13,13 @@ import com.example.link_pi.workbench.WorkbenchTask
 import com.example.link_pi.workbench.WorkbenchTaskStorage
 import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 class WorkbenchViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -36,6 +38,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
     val engineStepsMap: StateFlow<Map<String, List<AgentStep>>> = engine.stepsMap
 
     private val _runningTaskIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val _taskJobs = ConcurrentHashMap<String, Job>()
 
     // ── Model / thinking state ──
     private val _models = MutableStateFlow(aiConfig.getModels())
@@ -63,7 +66,9 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun deleteTask(taskId: String) {
-        if (taskId in _runningTaskIds) return  // don't delete a running task
+        // Cancel running job if any
+        _taskJobs.remove(taskId)?.cancel()
+        _runningTaskIds.remove(taskId)
         viewModelScope.launch(Dispatchers.IO) {
             val task = taskStorage.loadById(taskId) ?: return@launch
             taskStorage.delete(taskId)
@@ -91,7 +96,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             modelId = modelId,
             enableThinking = enableThinking
         )
-        viewModelScope.launch(Dispatchers.IO) {
+        val job = viewModelScope.launch(Dispatchers.IO) {
             taskStorage.save(task)
             _tasks.value = taskStorage.loadAll()
             _runningTaskIds.add(id)
@@ -102,19 +107,20 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } finally {
                 _runningTaskIds.remove(id)
+                _taskJobs.remove(id)
             }
             reload()
         }
+        _taskJobs[id] = job
         return id
     }
 
     /** Launch generation for a QUEUED or FAILED task. */
     fun runTask(taskId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        val job = viewModelScope.launch(Dispatchers.IO) {
             val task = taskStorage.loadById(taskId) ?: return@launch
             if (task.status != TaskStatus.QUEUED && task.status != TaskStatus.FAILED) return@launch
 
-            // Reset task state so the UI immediately reflects the retry
             val reset = task.copy(
                 status = TaskStatus.QUEUED,
                 error = null,
@@ -133,14 +139,16 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } finally {
                 _runningTaskIds.remove(taskId)
+                _taskJobs.remove(taskId)
             }
             reload()
         }
+        _taskJobs[taskId] = job
     }
 
     /** Modify an existing task: update its prompt and re-run the engine. */
     fun modifyApp(taskId: String, userPrompt: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        val job = viewModelScope.launch(Dispatchers.IO) {
             val existing = taskStorage.loadById(taskId) ?: return@launch
             val updated = existing.copy(
                 userPrompt = userPrompt,
@@ -161,9 +169,11 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
                 }
             } finally {
                 _runningTaskIds.remove(taskId)
+                _taskJobs.remove(taskId)
             }
             reload()
         }
+        _taskJobs[taskId] = job
     }
 
     /** Load a MiniApp by ID for running. */
