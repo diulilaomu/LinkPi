@@ -84,12 +84,12 @@ object IntentClassifier {
 
 类别：
 - CONVERSATION: 闲聊、提问、打招呼、询问某事是什么、讨论话题。"这是什么"、"怎么用"、"什么意思"等提问都是 CONVERSATION
-- CREATE_APP: 明确要求创建/构建/制作新的应用、游戏、工具、页面或交互功能。必须有创建动词如"做一个"、"写一个"、"帮我开发"
+- CREATE_APP: 要求创建/构建/制作新的应用、游戏、工具、页面或交互功能。包括：有创建动词如"做一个"、"写一个"；或者直接说出应用名称如"围棋应用"、"计算器"、"天气工具"等暗示要创建的短语
 - MODIFY_APP: 想要修改/修复/更新/改进现有应用
 - MODULE_MGMT: 想要创建/管理 API 模块或端点
 - MEMORY_OPS: 询问或管理记忆/偏好
 
-重要：仅当用户明确要求"创建/做/写"某个应用时才选 CREATE_APP。提问、描述、讨论等都是 CONVERSATION。
+重要：如果用户只说了一个应用/游戏/工具的名称（如"围棋应用"、"计算器"、"记事本"），应判定为 CREATE_APP。仅当用户在讨论、提问、闲聊时才选 CONVERSATION。
 
 上下文：has_active_workspace=$hasActiveWorkspace, current_skill=${skill.name}
 
@@ -104,8 +104,10 @@ object IntentClassifier {
             MEMORY_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MEMORY_OPS
             MODULE_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MODULE_MGMT
             hasActiveWorkspace && MODIFY_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MODIFY_APP
-            // Require both a creation verb AND a target noun to trigger CREATE_APP
+            // Verb + noun: explicit creation request
             CREATE_NOUN_KEYWORDS.any { containsKeyword(lower, it) } && CREATE_VERB_PATTERN.containsMatchIn(lower) -> UserIntent.CREATE_APP
+            // Short message with just a noun keyword (e.g. "围棋应用", "计算器游戏"): implicit creation
+            message.length <= 20 && CREATE_NOUN_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.CREATE_APP
             else -> UserIntent.CONVERSATION
         }
     }
