@@ -287,15 +287,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         launchOrchestrator()
     }
 
-    /** Dismiss the workbench confirmation card. */
+    /** Dismiss the workbench confirmation card — fall back to normal conversation. */
     fun dismissWorkbench() {
+        val req = _pendingWorkbench.value
         _pendingWorkbench.value = null
+        if (req != null) {
+            // Re-send as normal conversation
+            launchOrchestrator()
+        }
     }
 
     /** Confirm the workbench request — returns the WorkbenchRequest for the caller to act on. */
     fun confirmWorkbench(): WorkbenchRequest? {
         val req = _pendingWorkbench.value
         _pendingWorkbench.value = null
+        if (req != null) {
+            val msg = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = "assistant",
+                content = "好的，已为你创建任务「${req.title}」，前往工作台查看进度 🚀"
+            )
+            _messages.update { it + msg }
+            saveCurrentConversation()
+        }
         return req
     }
 
