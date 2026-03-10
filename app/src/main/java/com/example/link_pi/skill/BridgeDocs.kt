@@ -32,6 +32,11 @@ object BridgeDocs {
 - nativeFetch(url, options) — HTTP 请求（绕过 CORS）。返回类似 fetch API 的 Promise
   用法：nativeFetch('https://api.example.com/data', {method:'GET',headers:{},body:''}).then(r=>r.json()).then(data=>...)
   响应：{status, statusText, headers, body, ok, json(), text()}
+- callModule(moduleName, endpointName, params) — 调用动态 API 模块端点。返回 Promise
+  用法：callModule('weather', 'get_forecast', {city:'北京'}).then(r=>console.log(r))
+  params 为 JSON 对象，对应模块端点的 bodyTemplate 占位符 {{param}}
+- listModules() — 返回所有可用模块的数组（同步）。每个元素包含 name、description、endpoints
+  用法：const mods = listModules(); mods.forEach(m => console.log(m.name))
 """.trimIndent()
 
     private val GROUP_MAP = mapOf(

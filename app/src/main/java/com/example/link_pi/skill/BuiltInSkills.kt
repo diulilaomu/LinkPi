@@ -59,7 +59,7 @@ object BuiltInSkills {
 | STORAGE | saveData、loadData、removeData、clearData、listKeys、getAppId |
 | UI_FEEDBACK | showToast、vibrate、writeClipboard、sendToApp |
 | SENSOR | getDeviceInfo、getBatteryLevel、getLocation |
-| NETWORK | nativeFetch(url, options) — 绕过 CORS 的 HTTP 请求 |
+| NETWORK | nativeFetch(url, options) — 绕过 CORS 的 HTTP 请求；callModule(moduleName, endpointName, params) — 调用动态模块（Promise）；listModules() — 列出所有可用模块 |
 
 **CDN 库**（国内可访问的 CDN 链接，作为文档注入）：
 | 组 | 库 |
