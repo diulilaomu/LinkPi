@@ -189,14 +189,10 @@ class AgentOrchestrator(
                         onStep(AgentStep(StepType.THINKING, "工作区诊断", buildWorkspaceAppDiagnosis(toolExecutor.currentAppId)))
                     }
                 }
-                // For non-app intents (CONVERSATION etc.), check if AI already produced HTML
-                // For app intents (CREATE_APP, MODIFY_APP), always proceed to Generation phase
+                // For non-app intents (CONVERSATION etc.), break out of planning loop
+                // Apps are only generated through the workbench, never inline in chat
                 if (!intent.needsApp()) {
-                    val miniApp = MiniAppParser.extractMiniApp(response)
-                    if (miniApp != null) {
-                        onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
-                        return cleanResult(response, miniApp, toolIterations, latestThinking)
-                    }
+                    break
                 }
                 // Move to generation phase (or return text for non-app intents)
                 val stripped = ToolCall.stripToolCalls(response)
@@ -286,11 +282,11 @@ class AgentOrchestrator(
             }
         }
 
-        // ── Non-app intents: return planning response directly (no Generation phase) ──
+        // ── Non-app intents: return planning response directly (no Generation phase, no inline app) ──
         if (!intent.needsApp()) {
             val lastResponse = messages.lastOrNull { it["role"] == "assistant" }?.get("content") ?: ""
             onStep(AgentStep(StepType.FINAL_RESPONSE, "生成完成", ""))
-            return cleanResult(lastResponse, MiniAppParser.extractMiniApp(lastResponse), toolIterations, latestThinking)
+            return cleanResult(lastResponse, null, toolIterations, latestThinking)
         }
 
         // ── Phase 2: Generation (full token budget) — only for app intents ──
