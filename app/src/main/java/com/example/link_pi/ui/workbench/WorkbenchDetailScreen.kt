@@ -264,11 +264,13 @@ private fun StatusLabel(task: WorkbenchTask, actualFileCount: Int) {
         TaskStatus.COMPLETED -> "已完成 · $displayFileCount 个文件"
         TaskStatus.FAILED -> "失败"
         // For active states, prefer currentStep if available
-        else -> task.currentStep.takeIf { it.isNotBlank() } ?: when (task.status) {
-            TaskStatus.PLANNING -> "规划中..."
-            TaskStatus.GENERATING -> "生成中..."
-            TaskStatus.CHECKING -> "检查中..."
-            else -> ""
+        else -> task.currentStep.takeIf { it.isNotBlank() } ?: run {
+            val isModify = task.title.startsWith("修改")
+            when (task.status) {
+                TaskStatus.PLANNING -> if (isModify) "修改中..." else "规划中..."
+                TaskStatus.GENERATING, TaskStatus.CHECKING -> if (isModify) "修改中..." else "生成中..."
+                else -> ""
+            }
         }
     }
     Text(statusText, style = MaterialTheme.typography.labelSmall, color = color)
@@ -378,7 +380,7 @@ private fun WorkspaceTabContent(
                                 TaskStatus.FAILED -> "执行失败"
                                 TaskStatus.QUEUED -> "排队中"
                                 TaskStatus.PLANNING, TaskStatus.GENERATING,
-                                TaskStatus.CHECKING -> "处理中…"
+                                TaskStatus.CHECKING -> if (task.title.startsWith("修改")) "修改中…" else "处理中…"
                             }
                             dotColor = when (task.status) {
                                 TaskStatus.COMPLETED -> MaterialTheme.colorScheme.primary

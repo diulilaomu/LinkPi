@@ -223,7 +223,7 @@ private fun TaskCard(
 
             // Status label
             Text(
-                text = statusLabel(task.status),
+                text = statusLabel(task),
                 style = MaterialTheme.typography.labelSmall,
                 color = statusColor
             )
@@ -346,13 +346,15 @@ private fun TaskCard(
     }
 }
 
-private fun statusLabel(status: TaskStatus): String = when (status) {
-    TaskStatus.QUEUED -> "排队中"
-    TaskStatus.PLANNING -> "规划中"
-    TaskStatus.GENERATING -> "生成中"
-    TaskStatus.CHECKING -> "自检中"
-    TaskStatus.COMPLETED -> "已完成"
-    TaskStatus.FAILED -> "失败"
+private fun statusLabel(task: WorkbenchTask): String {
+    val isModify = task.title.startsWith("修改")
+    return when (task.status) {
+        TaskStatus.QUEUED -> "排队中"
+        TaskStatus.PLANNING -> if (isModify) "修改中" else "规划中"
+        TaskStatus.GENERATING, TaskStatus.CHECKING -> if (isModify) "修改中" else "生成中"
+        TaskStatus.COMPLETED -> "已完成"
+        TaskStatus.FAILED -> "失败"
+    }
 }
 
 private fun formatTaskTime(timestamp: Long): String {
