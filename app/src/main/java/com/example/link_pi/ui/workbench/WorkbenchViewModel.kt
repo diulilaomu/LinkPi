@@ -8,6 +8,7 @@ import com.example.link_pi.miniapp.MiniAppStorage
 import com.example.link_pi.network.AiConfig
 import com.example.link_pi.network.ModelConfig
 import com.example.link_pi.workbench.TaskStatus
+import com.example.link_pi.workbench.GenerationService
 import com.example.link_pi.workbench.WorkbenchEngine
 import com.example.link_pi.workbench.WorkbenchTask
 import com.example.link_pi.workbench.WorkbenchTaskStorage
@@ -40,6 +41,16 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
     private val _runningTaskIds = Collections.synchronizedSet(mutableSetOf<String>())
     private val _taskJobs = ConcurrentHashMap<String, Job>()
 
+    /** Manage foreground service lifecycle based on running task count. */
+    private fun updateService() {
+        val ctx = getApplication<Application>()
+        if (_runningTaskIds.isNotEmpty()) {
+            GenerationService.start(ctx)
+        } else {
+            GenerationService.stop(ctx)
+        }
+    }
+
     // ── Model / thinking state ──
     private val _models = MutableStateFlow(aiConfig.getModels())
     val models: StateFlow<List<ModelConfig>> = _models.asStateFlow()
@@ -69,6 +80,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
         // Cancel running job if any
         _taskJobs.remove(taskId)?.cancel()
         _runningTaskIds.remove(taskId)
+        updateService()
         viewModelScope.launch(Dispatchers.IO) {
             val task = taskStorage.loadById(taskId) ?: return@launch
             taskStorage.delete(taskId)
@@ -101,6 +113,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             _tasks.value = taskStorage.loadAll()
             _runningTaskIds.add(id)
             _activeTaskId.value = id
+            updateService()
             try {
                 engine.execute(task) { updated ->
                     _tasks.value = _tasks.value.map { if (it.id == updated.id) updated else it }
@@ -108,6 +121,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             } finally {
                 _runningTaskIds.remove(id)
                 _taskJobs.remove(id)
+                updateService()
             }
             reload()
         }
@@ -133,6 +147,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
 
             _runningTaskIds.add(taskId)
             _activeTaskId.value = taskId
+            updateService()
             try {
                 engine.execute(reset) { updated ->
                     _tasks.value = _tasks.value.map { if (it.id == updated.id) updated else it }
@@ -140,6 +155,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             } finally {
                 _runningTaskIds.remove(taskId)
                 _taskJobs.remove(taskId)
+                updateService()
             }
             reload()
         }
@@ -163,6 +179,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
 
             _runningTaskIds.add(taskId)
             _activeTaskId.value = taskId
+            updateService()
             try {
                 engine.execute(updated) { step ->
                     _tasks.value = _tasks.value.map { if (it.id == step.id) step else it }
@@ -170,6 +187,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             } finally {
                 _runningTaskIds.remove(taskId)
                 _taskJobs.remove(taskId)
+                updateService()
             }
             reload()
         }
