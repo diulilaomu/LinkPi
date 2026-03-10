@@ -72,6 +72,7 @@ import com.example.link_pi.ui.miniapp.MiniAppListScreen
 import com.example.link_pi.ui.miniapp.MiniAppScreen
 import com.example.link_pi.ui.miniapp.exportMiniApp
 import com.example.link_pi.ui.settings.MemoryScreen
+import com.example.link_pi.ui.settings.CredentialScreen
 import com.example.link_pi.ui.settings.ModelEditScreen
 import com.example.link_pi.ui.settings.ModelManageScreen
 import com.example.link_pi.ui.settings.ModuleScreen
@@ -94,6 +95,7 @@ sealed class Screen(val route: String, val title: String) {
     data object SkillSettings : Screen("settings/skills", "Skill 管理")
     data object MemorySettings : Screen("settings/memory", "长期记忆")
     data object ModuleSettings : Screen("settings/modules", "模块管理")
+    data object CredentialSettings : Screen("settings/credentials", "凭据管理")
     data object ShareSettings : Screen("settings/share", "本地分享")
 }
 
@@ -128,6 +130,7 @@ fun LinkPiApp() {
             Screen.SkillSettings.route,
             Screen.MemorySettings.route,
             Screen.ModuleSettings.route,
+            Screen.CredentialSettings.route,
             Screen.ShareSettings.route -> currentPage = Screen.Settings.route
             Screen.ModelEdit("").route -> currentPage = Screen.ModelManage.route
             Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
@@ -249,6 +252,7 @@ fun LinkPiApp() {
                         Screen.SkillSettings.route -> Screen.SkillSettings.title
                         Screen.MemorySettings.route -> Screen.MemorySettings.title
                         Screen.ModuleSettings.route -> Screen.ModuleSettings.title
+                        Screen.CredentialSettings.route -> Screen.CredentialSettings.title
                         Screen.ShareSettings.route -> Screen.ShareSettings.title
                         else -> ""
                     }
@@ -257,6 +261,7 @@ fun LinkPiApp() {
                         Screen.SkillSettings.route,
                         Screen.MemorySettings.route,
                         Screen.ModuleSettings.route,
+                        Screen.CredentialSettings.route,
                         Screen.ShareSettings.route -> Screen.Settings.route
                         Screen.ModelEdit("").route -> Screen.ModelManage.route
                         else -> Screen.Chat.route
@@ -365,6 +370,7 @@ fun LinkPiApp() {
                 )
                 Screen.MemorySettings.route -> MemoryScreen()
                 Screen.ModuleSettings.route -> ModuleScreen()
+                Screen.CredentialSettings.route -> CredentialScreen()
                 Screen.ShareSettings.route -> ShareScreen()
             }
         }

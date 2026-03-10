@@ -21,6 +21,7 @@ import androidx.compose.material.icons.outlined.Inventory2
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.VpnKey
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -49,6 +50,7 @@ fun SettingsScreen(
         SettingsItem(Icons.Outlined.Extension, "Skill 管理", "内置与自定义 Skill", "settings/skills"),
         SettingsItem(Icons.Outlined.Psychology, "长期记忆", "AI 记住的偏好与信息", "settings/memory"),
         SettingsItem(Icons.Outlined.Inventory2, "模块管理", "AI 创建的 API 服务模块", "settings/modules"),
+        SettingsItem(Icons.Outlined.VpnKey, "凭据管理", "Token、账号密码等加密存储", "settings/credentials"),
         SettingsItem(Icons.Outlined.Share, "本地分享", "局域网分享 Skill、模块、应用", "settings/share"),
     )
 
