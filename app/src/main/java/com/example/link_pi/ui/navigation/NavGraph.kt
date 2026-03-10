@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Delete
@@ -231,7 +232,7 @@ fun LinkPiApp() {
             when (currentPage) {
                 Screen.Chat.route -> {
                     IconButton(onClick = { showConversationList = !showConversationList }) {
-                        Icon(Icons.Outlined.History, contentDescription = "会话历史")
+                        Icon(Icons.Outlined.Menu, contentDescription = "会话历史")
                     }
                     Spacer(modifier = Modifier.weight(1f))
                     IconButton(onClick = { currentPage = Screen.Workbench.route }) {
@@ -422,8 +423,8 @@ private fun ConversationListPanel(
             shadowElevation = 8.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // ── 上部：会话列表 (80%) ──
-                Column(modifier = Modifier.weight(0.8f)) {
+                // ── 上部：会话列表 (90%) ──
+                Column(modifier = Modifier.weight(0.9f)) {
                     Text(
                         text = "会话历史",
                         style = MaterialTheme.typography.titleMedium,
@@ -504,11 +505,11 @@ private fun ConversationListPanel(
                     }
                 }
 
-                // ── 下部：功能图标栏 (20%) ──
+                // ── 下部：功能图标栏 (10%) ──
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Row(
                     modifier = Modifier
-                        .weight(0.2f)
+                        .weight(0.1f)
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 12.dp),
