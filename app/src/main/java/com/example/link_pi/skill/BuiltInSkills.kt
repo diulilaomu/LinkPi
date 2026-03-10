@@ -376,6 +376,11 @@ callModule('dlt645_meter', 'read_energy', {
 - hex 模式下占位符值也应为 hex 字符串（空格分隔）
 - 模块名称匹配不区分大小写
 - 使用 list_modules 查看所有已创建的模块
+
+**重要规则：**
+- 模块是**客户端代理**，只能连接外部已有的服务器，不能创建/托管本地服务器
+- 如果用户需要本地局域网服务器功能（如围棋联网对战服务器），应告知用户：在创建应用时使用内置的 REALTIME（WebSocket Server）能力，而非模块
+- 完成模块创建/修改/查询后，直接回复结果即可，**不要**继续规划或生成应用代码
 """.trimIndent()
 
     private val MEMORY_SECTION_WITH_SNAPSHOT = """
