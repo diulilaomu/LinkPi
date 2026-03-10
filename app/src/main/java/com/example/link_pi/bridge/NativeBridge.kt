@@ -33,6 +33,7 @@ class NativeBridge(
     private val moduleStorage: ModuleStorage? = null
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
+    var webSocketBridge: WebSocketBridge? = null
 
     private fun getPrefs() =
         context.getSharedPreferences("miniapp_data_$appId", Context.MODE_PRIVATE)
@@ -253,6 +254,52 @@ class NativeBridge(
                 callbackToJs(callbackId, JSONObject().put("error", e.message ?: "Request failed").toString())
             }
         }
+    }
+
+    // ── WebSocket Server ──────────────────────────────
+
+    @JavascriptInterface
+    fun startWebSocketServer(callbackId: String, port: Int) {
+        if (!callbackId.matches(Regex("^[a-zA-Z0-9_]+$"))) return
+        ModuleStorage.ioExecutor.execute {
+            val ws = WebSocketBridge(jsEvaluator)
+            val result = ws.start(port)
+            if (result.isSuccess) {
+                webSocketBridge = ws
+                val ip = WebSocketBridge.getLocalIpAddress()
+                callbackToJs(callbackId, JSONObject().apply {
+                    put("ok", true)
+                    put("port", result.getOrDefault(port))
+                    put("ip", ip)
+                }.toString())
+            } else {
+                callbackToJs(callbackId, JSONObject().apply {
+                    put("ok", false)
+                    put("error", result.exceptionOrNull()?.message ?: "Failed to start server")
+                }.toString())
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun stopWebSocketServer() {
+        webSocketBridge?.stop()
+        webSocketBridge = null
+    }
+
+    @JavascriptInterface
+    fun serverSend(clientId: String, message: String) {
+        webSocketBridge?.send(clientId, message)
+    }
+
+    @JavascriptInterface
+    fun serverBroadcast(message: String) {
+        webSocketBridge?.broadcast(message)
+    }
+
+    @JavascriptInterface
+    fun getLocalIpAddress(): String {
+        return WebSocketBridge.getLocalIpAddress()
     }
 
     @JavascriptInterface

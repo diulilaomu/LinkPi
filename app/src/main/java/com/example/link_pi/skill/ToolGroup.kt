@@ -22,7 +22,8 @@ enum class BridgeGroup {
     STORAGE,       // saveData, loadData, removeData, clearData, listKeys, getAppId
     UI_FEEDBACK,   // showToast, vibrate, writeClipboard, sendToApp
     SENSOR,        // getDeviceInfo, getBatteryLevel, getLocation
-    NETWORK        // nativeFetch
+    NETWORK,       // nativeFetch, callModule, listModules
+    REALTIME       // WebSocket server, getLocalIp — LAN real-time communication
 }
 
 /** CDN library groups. */

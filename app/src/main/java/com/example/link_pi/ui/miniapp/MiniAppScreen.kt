@@ -78,6 +78,35 @@ window.listModules=function(){
     if(!window.NativeBridge||!window.NativeBridge.listModules) return [];
     try{return JSON.parse(NativeBridge.listModules())}catch(e){return []}
 };
+window.__wsServerEvent=function(b){
+    try{var e=JSON.parse(atob(b));if(window.onServerEvent)window.onServerEvent(e);}catch(ex){}
+};
+window.startServer=function(port){
+    return new Promise(function(resolve,reject){
+        if(!window.NativeBridge||!window.NativeBridge.startWebSocketServer){
+            reject(new Error('NativeBridge unavailable'));return;
+        }
+        var id='_ws'+Math.random().toString(36).substr(2,9);
+        window.__nfCbs[id]=function(r){
+            if(r.ok)resolve({port:r.port,ip:r.ip});
+            else reject(new Error(r.error||'Failed'));
+        };
+        NativeBridge.startWebSocketServer(id,port||8080);
+    });
+};
+window.stopServer=function(){
+    if(window.NativeBridge&&window.NativeBridge.stopWebSocketServer)NativeBridge.stopWebSocketServer();
+};
+window.serverSend=function(clientId,msg){
+    if(window.NativeBridge&&window.NativeBridge.serverSend)NativeBridge.serverSend(clientId,msg);
+};
+window.serverBroadcast=function(msg){
+    if(window.NativeBridge&&window.NativeBridge.serverBroadcast)NativeBridge.serverBroadcast(msg);
+};
+window.getLocalIp=function(){
+    if(!window.NativeBridge||!window.NativeBridge.getLocalIpAddress)return '';
+    return NativeBridge.getLocalIpAddress();
+};
 </script>
 """
 
@@ -126,6 +155,7 @@ fun MiniAppWebView(
     val context = LocalContext.current
     val moduleStorage = remember { ModuleStorage(context) }
     val cdnProxy = remember { CdnProxy(context) }
+    var nativeBridgeRef: NativeBridge? = null
     val webView = remember {
         WebView(context).apply {
                 settings.javaScriptEnabled = true
@@ -162,13 +192,12 @@ fun MiniAppWebView(
                 }
 
                 val wv = this
-                addJavascriptInterface(
-                    NativeBridge(context, appId, onSendToApp,
+                val bridge = NativeBridge(context, appId, onSendToApp,
                         jsEvaluator = { js -> wv.evaluateJavascript(js, null) },
                         moduleStorage = moduleStorage
-                    ),
-                    "NativeBridge"
-                )
+                    )
+                nativeBridgeRef = bridge
+                addJavascriptInterface(bridge, "NativeBridge")
 
                 // Inject error overlay + nativeFetch polyfill before the HTML content
                 val errorOverlay = """
@@ -232,6 +261,7 @@ fun MiniAppWebView(
 
     DisposableEffect(Unit) {
         onDispose {
+            nativeBridgeRef?.webSocketBridge?.stop()
             webView.removeJavascriptInterface("NativeBridge")
             webView.stopLoading()
             webView.loadUrl("about:blank")
@@ -262,6 +292,7 @@ fun WorkspaceMiniAppWebView(
     val moduleStorage = remember { ModuleStorage(context) }
     val workspaceDir = remember { workspaceManager.getWorkspaceDir(appId) }
     val cdnProxy = remember { CdnProxy(context) }
+    var nativeBridgeRef: NativeBridge? = null
     val webView = remember {
         WebView(context).apply {
                 settings.javaScriptEnabled = true
@@ -326,13 +357,12 @@ fun WorkspaceMiniAppWebView(
                 }
 
                 val wv = this
-                addJavascriptInterface(
-                    NativeBridge(context, appId, onSendToApp,
+                val bridge = NativeBridge(context, appId, onSendToApp,
                         jsEvaluator = { js -> wv.evaluateJavascript(js, null) },
                         moduleStorage = moduleStorage
-                    ),
-                    "NativeBridge"
-                )
+                    )
+                nativeBridgeRef = bridge
+                addJavascriptInterface(bridge, "NativeBridge")
 
                 // Read entry file and inject error overlay + nativeFetch
                 val entryContent = workspaceManager.readEntryFile(appId, entryFile) ?: "<html><body><h1>Entry file not found</h1></body></html>"
@@ -398,6 +428,7 @@ fun WorkspaceMiniAppWebView(
 
     DisposableEffect(Unit) {
         onDispose {
+            nativeBridgeRef?.webSocketBridge?.stop()
             webView.removeJavascriptInterface("NativeBridge")
             webView.stopLoading()
             webView.loadUrl("about:blank")

@@ -39,11 +39,37 @@ object BridgeDocs {
   用法：const mods = listModules(); mods.forEach(m => console.log(m.name))
 """.trimIndent()
 
+    private val REALTIME = """
+- startServer(port) — 启动 WebSocket 服务器。返回 Promise<{port, ip}>
+  用法：startServer(8080).then(info => console.log('服务器运行在 ws://' + info.ip + ':' + info.port))
+- onServerEvent — 设置服务器事件回调函数
+  window.onServerEvent = function(event) { ... }
+  event.type: "connection"（新客户端连接，含 clientId、address）
+           | "message"（收到消息，含 clientId、data）
+           | "close"（客户端断开，含 clientId）
+           | "error"（错误，含 message）
+- serverSend(clientId, message) — 向指定客户端发送消息
+- serverBroadcast(message) — 向所有连接的客户端广播消息
+- stopServer() — 停止 WebSocket 服务器
+- getLocalIp() — 返回设备局域网 IP 地址（同步），用于客户端发现服务器
+
+客户端连接方式（标准 WebSocket API，无需额外封装）：
+  const ws = new WebSocket('ws://' + serverIp + ':' + port);
+  ws.onmessage = function(e) { console.log(e.data); };
+  ws.send(JSON.stringify({type:'move', x:3, y:5}));
+
+典型用法（局域网对战）：
+  设备A（主机）：调用 startServer(8080)，显示 IP 给对方
+  设备B（客户端）：用 new WebSocket('ws://对方IP:8080') 连接
+  双向通信通过 serverSend/serverBroadcast（主机端）和 ws.send（客户端）完成
+""".trimIndent()
+
     private val GROUP_MAP = mapOf(
         BridgeGroup.STORAGE to STORAGE,
         BridgeGroup.UI_FEEDBACK to UI_FEEDBACK,
         BridgeGroup.SENSOR to SENSOR,
-        BridgeGroup.NETWORK to NETWORK
+        BridgeGroup.NETWORK to NETWORK,
+        BridgeGroup.REALTIME to REALTIME
     )
 
     /**

@@ -1,0 +1,52 @@
+{
+  "name": "围棋双人对战",
+  "version": 2,
+  "description": "一款支持本地和局域网对战的围棋应用，提供9路、13路、19路多种棋盘规格，具备提子计数、悔棋、打劫检测等完整围棋规则功能。",
+  "fileCount": 6,
+  "totalSize": "64KB",
+  "updatedAt": "2026-03-10 01:35:37",
+  "files": [
+    {
+      "path": "game.js",
+      "size": "14KB"
+    },
+    {
+      "path": "index.html",
+      "size": "6KB"
+    },
+    {
+      "path": "network.js",
+      "size": "6KB"
+    },
+    {
+      "path": "storage.js",
+      "size": "4KB"
+    },
+    {
+      "path": "styles.css",
+      "size": "8KB"
+    },
+    {
+      "path": "ui.js",
+      "size": "24KB"
+    }
+  ],
+  "usedTools": [
+    "list_modules",
+    "create_file",
+    "validate_html"
+  ],
+  "nativeBridgeApis": [
+    "STORAGE",
+    "UI_FEEDBACK"
+  ],
+  "modules": [
+    "create_room",
+    "get_messages",
+    "join_room",
+    "leave_room",
+    "list_rooms",
+    "send_message",
+    "start_server"
+  ]
+}

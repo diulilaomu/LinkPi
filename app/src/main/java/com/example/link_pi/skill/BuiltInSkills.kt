@@ -60,6 +60,7 @@ object BuiltInSkills {
 | UI_FEEDBACK | showToast、vibrate、writeClipboard、sendToApp |
 | SENSOR | getDeviceInfo、getBatteryLevel、getLocation |
 | NETWORK | nativeFetch(url, options) — 绕过 CORS 的 HTTP 请求；callModule(moduleName, endpointName, params) — 调用动态模块（Promise）；listModules() — 列出所有可用模块 |
+| REALTIME | startServer(port) — 启动 WebSocket 服务器（Promise）；onServerEvent — 服务器事件回调；serverSend/serverBroadcast — 发送消息；stopServer()；getLocalIp() — 获取局域网IP。客户端用标准 new WebSocket('ws://ip:port') 连接 |
 
 **CDN 库**（国内可访问的 CDN 链接，作为文档注入）：
 | 组 | 库 |

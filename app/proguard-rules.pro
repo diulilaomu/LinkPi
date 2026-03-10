@@ -24,6 +24,10 @@
 -keep class okhttp3.** { *; }
 -keep interface okhttp3.** { *; }
 
+# ── Java-WebSocket ──
+-keep class org.java_websocket.** { *; }
+-dontwarn org.java_websocket.**
+
 # ── Google Tink / errorprone annotations ──
 -dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
 -dontwarn com.google.errorprone.annotations.CheckReturnValue
