@@ -124,25 +124,6 @@ fun SkillListScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // ── 重置按钮 ──
-            if (hasOverrides || userSkills.isNotEmpty()) {
-                item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
-                        TextButton(onClick = { showResetDialog = true }) {
-                            Icon(
-                                Icons.Outlined.Refresh,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("重置全部", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
-            }
             // ── 内置角色 ──
             item {
                 Text(
@@ -215,6 +196,23 @@ fun SkillListScreen(
                     )
                 }
             }
+            // ── 重置按钮（底部靠左） ──
+            if (hasOverrides || userSkills.isNotEmpty()) {
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    TextButton(onClick = { showResetDialog = true }) {
+                        Icon(
+                            Icons.Outlined.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("重置全部", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
+            // 底部留出 FAB 空间
+            item { Spacer(modifier = Modifier.height(72.dp)) }
         }
     }
 
@@ -361,23 +359,26 @@ private fun SkillCard(
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                FlowRow(
+                    verticalArrangement = Arrangement.Center,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     Text(
                         text = skill.name,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (skill.mode == SkillMode.CODING) "编程" else "闲聊",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.align(Alignment.CenterVertically)
                     )
                     if (isActive) {
-                        Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         ) {
                             Text(
                                 text = "使用中",
@@ -388,10 +389,10 @@ private fun SkillCard(
                         }
                     }
                     if (isModified) {
-                        Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         ) {
                             Text(
                                 text = "已修改",
@@ -402,10 +403,10 @@ private fun SkillCard(
                         }
                     }
                     if (skill.intentInjections.isNotEmpty()) {
-                        Spacer(modifier = Modifier.width(6.dp))
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
+                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         ) {
                             Text(
                                 text = "注入",
