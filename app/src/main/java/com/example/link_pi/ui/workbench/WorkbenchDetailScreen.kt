@@ -1,5 +1,8 @@
 package com.example.link_pi.ui.workbench
 
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
@@ -37,6 +40,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
@@ -91,6 +95,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -140,10 +145,37 @@ fun WorkbenchDetailScreen(
 
     // File viewer/editor state
     var openFilePath by remember { mutableStateOf<String?>(null) }
+    var showCreateFileDialog by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let {
+            coroutineScope.launch(Dispatchers.IO) {
+                val cursor = context.contentResolver.query(it, null, null, null, null)
+                var fileName = "imported_file"
+                cursor?.use { c ->
+                    if (c.moveToFirst()) {
+                        val idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) fileName = c.getString(idx) ?: fileName
+                    }
+                }
+                val text = context.contentResolver.openInputStream(it)
+                    ?.bufferedReader()?.readText()
+                if (text != null) {
+                    viewModel.writeFileContent(task.appId, fileName, text)
+                    val newFiles = viewModel.getWorkspaceFiles(task.appId)
+                    withContext(Dispatchers.Main) { files = newFiles }
+                }
+            }
+        }
+    }
 
     val tabTitles = listOf("运行", "工作台", "需求")
     val pagerState = rememberPagerState(pageCount = { tabTitles.size })
-    val coroutineScope = rememberCoroutineScope()
 
     Column(modifier = Modifier.fillMaxSize()) {
         // ── Top bar: back + title + status ──
@@ -231,7 +263,14 @@ fun WorkbenchDetailScreen(
                     isActiveTask = isActiveTask,
                     task = task,
                     viewModel = viewModel,
-                    onFileClick = { path -> openFilePath = path }
+                    onFileClick = { path -> openFilePath = path },
+                    onPickFile = {
+                        filePickerLauncher.launch(arrayOf(
+                            "text/*", "application/json", "application/javascript",
+                            "application/xml", "application/xhtml+xml"
+                        ))
+                    },
+                    onCreateFile = { showCreateFileDialog = true }
                 )
                 2 -> RequirementTabContent(task)
             }
@@ -245,6 +284,21 @@ fun WorkbenchDetailScreen(
             filePath = openFilePath!!,
             viewModel = viewModel,
             onDismiss = { openFilePath = null }
+        )
+    }
+
+    // ── Create file dialog ──
+    if (showCreateFileDialog) {
+        CreateFileDialog(
+            onConfirm = { fileName ->
+                showCreateFileDialog = false
+                coroutineScope.launch(Dispatchers.IO) {
+                    viewModel.writeFileContent(task.appId, fileName, "")
+                    val newFiles = viewModel.getWorkspaceFiles(task.appId)
+                    withContext(Dispatchers.Main) { files = newFiles }
+                }
+            },
+            onDismiss = { showCreateFileDialog = false }
         )
     }
 }
@@ -284,7 +338,9 @@ private fun WorkspaceTabContent(
     isActiveTask: Boolean,
     task: WorkbenchTask,
     viewModel: WorkbenchViewModel,
-    onFileClick: (String) -> Unit = {}
+    onFileClick: (String) -> Unit = {},
+    onPickFile: () -> Unit = {},
+    onCreateFile: () -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -294,9 +350,18 @@ private fun WorkspaceTabContent(
     val listBottomPadding = if (imeBottomDp > navBarBottomDp) 0.dp else inputBarHeight + 16.dp
 
     var inputText by remember { mutableStateOf("") }
-    var isSending by remember { mutableStateOf(false) }
+    var justSent by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
     var messagesExpanded by remember { mutableStateOf(false) }
+
+    val isBusy = justSent || task.status in listOf(
+        TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.GENERATING, TaskStatus.CHECKING
+    )
+    LaunchedEffect(task.status) {
+        if (task.status in listOf(TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.GENERATING, TaskStatus.CHECKING)) {
+            justSent = false
+        }
+    }
 
     val models by viewModel.models.collectAsState()
     val activeModelId by viewModel.activeModelId.collectAsState()
@@ -317,14 +382,30 @@ private fun WorkspaceTabContent(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (files.isNotEmpty()) {
-                item { FileTreeSection(files, onFileClick) }
+                item { FileTreeSection(files, onFileClick, onCreateFile) }
             }
             if (files.isEmpty() && engineSteps.isEmpty()) {
                 item {
                     Box(modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
                         contentAlignment = Alignment.Center) {
-                        Text("暂无文件", style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("暂无文件", style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            OutlinedButton(onClick = onCreateFile) {
+                                Icon(Icons.Filled.Add, contentDescription = null,
+                                    modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("新建文件")
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(onClick = onPickFile) {
+                                Icon(Icons.Outlined.AttachFile, contentDescription = null,
+                                    modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("导入文件")
+                            }
+                        }
                     }
                 }
             }
@@ -632,7 +713,7 @@ private fun WorkspaceTabContent(
 
                         // Attachment button
                         Surface(
-                            onClick = { /* TODO: attachment picker */ },
+                            onClick = onPickFile,
                             shape = RoundedCornerShape(16.dp),
                             color = Color.Transparent
                         ) {
@@ -646,17 +727,14 @@ private fun WorkspaceTabContent(
                     }
 
                     // Send button
-                    val canSend = inputText.isNotBlank() && !isSending
+                    val canSend = inputText.isNotBlank() && !isBusy
                     Surface(
                         onClick = {
                             if (canSend) {
                                 val prompt = inputText.trim()
                                 inputText = ""
-                                isSending = true
-                                coroutineScope.launch {
-                                    viewModel.modifyApp(task.id, prompt)
-                                    isSending = false
-                                }
+                                justSent = true
+                                viewModel.modifyApp(task.id, prompt)
                             }
                         },
                         enabled = canSend,
@@ -810,7 +888,7 @@ private fun RunTabContent(
 }
 
 @Composable
-private fun FileTreeSection(files: List<String>, onFileClick: (String) -> Unit = {}) {
+private fun FileTreeSection(files: List<String>, onFileClick: (String) -> Unit = {}, onAdd: () -> Unit = {}) {
     var expanded by remember { mutableStateOf(true) }
 
     Card(
@@ -832,7 +910,18 @@ private fun FileTreeSection(files: List<String>, onFileClick: (String) -> Unit =
                     tint = MaterialTheme.colorScheme.primary)
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("文件 (${files.size})", style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium)
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f))
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = "新建文件",
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onAdd)
+                        .padding(3.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
             AnimatedVisibility(
                 visible = expanded,
@@ -1162,6 +1251,53 @@ private fun StepItem(step: AgentStep) {
                     modifier = Modifier.size(16.dp).padding(top = 3.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                 )
+            }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━ Create File Dialog ━━━━━━━━━━━━━
+@Composable
+private fun CreateFileDialog(
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var fileName by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        ) {
+            Column(modifier = Modifier.padding(20.dp)) {
+                Text("新建文件", style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold)
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = fileName,
+                    onValueChange = { fileName = it },
+                    placeholder = { Text("例如: style.css") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    OutlinedButton(onClick = onDismiss) {
+                        Text("取消")
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = { onConfirm(fileName.trim()) },
+                        enabled = fileName.isNotBlank()
+                    ) {
+                        Text("创建")
+                    }
+                }
             }
         }
     }
