@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Code
@@ -113,7 +114,8 @@ fun WorkbenchDetailScreen(
     taskId: String,
     onBack: () -> Unit,
     onRunApp: (String) -> Unit,
-    onRetry: (String) -> Unit
+    onRetry: (String) -> Unit,
+    onExport: (String) -> Unit = {}
 ) {
     val tasks by viewModel.tasks.collectAsState()
     val task = tasks.find { it.id == taskId }
@@ -222,7 +224,7 @@ fun WorkbenchDetailScreen(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             when (page) {
-                0 -> RunTabContent(task, onRunApp, onRetry)
+                0 -> RunTabContent(task, onRunApp, onRetry, onExport)
                 1 -> WorkspaceTabContent(
                     files = files,
                     engineSteps = engineSteps,
@@ -714,7 +716,8 @@ private fun RequirementTabContent(task: WorkbenchTask) {
 private fun RunTabContent(
     task: WorkbenchTask,
     onRunApp: (String) -> Unit,
-    onRetry: (String) -> Unit
+    onRetry: (String) -> Unit,
+    onExport: (String) -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -771,6 +774,16 @@ private fun RunTabContent(
                             modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("运行应用")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { onExport(task.appId) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Share, contentDescription = null,
+                            modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("导出应用")
                     }
                 }
                 if (task.status == TaskStatus.FAILED || task.status == TaskStatus.QUEUED) {

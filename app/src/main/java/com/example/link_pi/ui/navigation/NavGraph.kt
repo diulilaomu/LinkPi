@@ -69,6 +69,7 @@ import com.example.link_pi.ui.chat.ChatScreen
 import com.example.link_pi.ui.chat.ChatViewModel
 import com.example.link_pi.ui.miniapp.MiniAppListScreen
 import com.example.link_pi.ui.miniapp.MiniAppScreen
+import com.example.link_pi.ui.miniapp.exportMiniApp
 import com.example.link_pi.ui.settings.MemoryScreen
 import com.example.link_pi.ui.settings.ModelEditScreen
 import com.example.link_pi.ui.settings.ModelManageScreen
@@ -325,6 +326,14 @@ fun LinkPiApp() {
                         },
                         onRetry = { taskId ->
                             workbenchViewModel.runTask(taskId)
+                        },
+                        onExport = { appId ->
+                            val app = workbenchViewModel.loadMiniApp(appId)
+                            if (app != null) {
+                                exportMiniApp(context, app)
+                            } else {
+                                Toast.makeText(context, "应用不存在", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     )
                 }
