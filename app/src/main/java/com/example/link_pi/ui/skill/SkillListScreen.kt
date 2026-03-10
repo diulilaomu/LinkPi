@@ -359,8 +359,8 @@ private fun SkillCard(
             )
             Spacer(modifier = Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                FlowRow(
-                    verticalArrangement = Arrangement.Center,
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text(
@@ -371,48 +371,18 @@ private fun SkillCard(
                     Text(
                         text = if (skill.mode == SkillMode.CODING) "编程" else "闲聊",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.align(Alignment.CenterVertically)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                     )
                     if (isActive) {
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                            modifier = Modifier.align(Alignment.CenterVertically)
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                         ) {
                             Text(
                                 text = "使用中",
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                    if (isModified) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f),
-                            modifier = Modifier.align(Alignment.CenterVertically)
-                        ) {
-                            Text(
-                                text = "已修改",
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.tertiary
-                            )
-                        }
-                    }
-                    if (skill.intentInjections.isNotEmpty()) {
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f),
-                            modifier = Modifier.align(Alignment.CenterVertically)
-                        ) {
-                            Text(
-                                text = "注入",
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.secondary
                             )
                         }
                     }
@@ -425,6 +395,39 @@ private fun SkillCard(
                         overflow = TextOverflow.Ellipsis,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                if (isModified || skill.intentInjections.isNotEmpty()) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        if (isModified) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = "已修改",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary
+                                )
+                            }
+                        }
+                        if (skill.intentInjections.isNotEmpty()) {
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    text = "注入",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                        }
+                    }
                 }
             }
             if (onEdit != null) {
