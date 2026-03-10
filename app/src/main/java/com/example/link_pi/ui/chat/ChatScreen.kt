@@ -115,6 +115,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 fun ChatScreen(
     viewModel: ChatViewModel,
     onRunApp: (MiniApp) -> Unit,
+    onEnterSshMode: (String) -> Unit = {},
     onNavigateWorkbench: (ChatViewModel.WorkbenchRequest) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -132,6 +133,7 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val pendingAttachments by viewModel.pendingAttachments.collectAsState()
     val pendingWorkbench by viewModel.pendingWorkbench.collectAsState()
+    val pendingSshSession by viewModel.pendingSshSession.collectAsState()
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -215,6 +217,19 @@ fun ChatScreen(
                         onDismiss = {
                             viewModel.dismissWorkbench()
                         }
+                    )
+                }
+            }
+            // SSH mode prompt card
+            pendingSshSession?.let { sessionId ->
+                item {
+                    SshModePromptCard(
+                        sessionId = sessionId,
+                        onEnter = {
+                            viewModel.dismissSshPrompt()
+                            onEnterSshMode(sessionId)
+                        },
+                        onDismiss = { viewModel.dismissSshPrompt() }
                     )
                 }
             }
@@ -861,167 +876,7 @@ private fun parseResponseSegments(content: String): List<ResponseSegment> {
     return segments
 }
 
-// ── Markdown Rendering ──
-
-private sealed class MdBlock {
-    data class Paragraph(val text: String) : MdBlock()
-    data class Header(val level: Int, val text: String) : MdBlock()
-    data class BulletItem(val text: String) : MdBlock()
-    data class NumberedItem(val number: String, val text: String) : MdBlock()
-    data class Quote(val text: String) : MdBlock()
-    data class Table(val headers: List<String>, val rows: List<List<String>>) : MdBlock()
-    data object HorizontalRule : MdBlock()
-}
-
-private fun parseMarkdownBlocks(text: String): List<MdBlock> {
-    val blocks = mutableListOf<MdBlock>()
-    val lines = text.lines()
-    val buf = StringBuilder()
-    val tableLines = mutableListOf<String>()
-
-    fun flushTable() {
-        if (tableLines.size >= 2) {
-            fun splitRow(line: String): List<String> =
-                line.trim().removePrefix("|").removeSuffix("|").split("|").map { it.trim() }
-            val headers = splitRow(tableLines[0])
-            val isSep = tableLines[1].replace(Regex("[|\\s:-]"), "").isEmpty()
-            val dataStart = if (isSep) 2 else 1
-            val rows = tableLines.drop(dataStart).map { splitRow(it) }
-            blocks.add(MdBlock.Table(headers, rows))
-        } else if (tableLines.size == 1) {
-            blocks.add(MdBlock.Paragraph(tableLines[0]))
-        }
-        tableLines.clear()
-    }
-
-    fun flush() {
-        flushTable()
-        if (buf.isNotBlank()) blocks.add(MdBlock.Paragraph(buf.toString().trim()))
-        buf.clear()
-    }
-
-    for (line in lines) {
-        val t = line.trimEnd()
-        if (tableLines.isNotEmpty() && !t.trimStart().startsWith("|")) {
-            flushTable()
-        }
-        when {
-            t.trimStart().startsWith("|") -> {
-                if (buf.isNotBlank()) {
-                    blocks.add(MdBlock.Paragraph(buf.toString().trim()))
-                    buf.clear()
-                }
-                tableLines.add(t)
-            }
-            t.isBlank() -> flush()
-            t.matches(Regex("^#{1,6}\\s+.+")) -> {
-                flush()
-                val lvl = t.takeWhile { it == '#' }.length
-                blocks.add(MdBlock.Header(lvl, t.dropWhile { it == '#' }.trim()))
-            }
-            t.matches(Regex("^\\s*[-*+]\\s+.+")) -> {
-                flush()
-                blocks.add(MdBlock.BulletItem(t.trimStart().drop(2)))
-            }
-            t.matches(Regex("^\\s*\\d+\\.\\s+.+")) -> {
-                flush()
-                val s = t.trimStart()
-                val dot = s.indexOf('.')
-                blocks.add(MdBlock.NumberedItem(s.substring(0, dot), s.substring(dot + 1).trimStart()))
-            }
-            t.matches(Regex("^>\\s?.*")) -> {
-                val content = when {
-                    t.startsWith("> ") -> t.drop(2)
-                    t.startsWith(">") -> t.drop(1)
-                    else -> t
-                }
-                val last = blocks.lastOrNull()
-                if (last is MdBlock.Quote && buf.isEmpty()) {
-                    blocks[blocks.size - 1] = MdBlock.Quote(last.text + "\n" + content)
-                } else {
-                    flush()
-                    blocks.add(MdBlock.Quote(content))
-                }
-            }
-            t.matches(Regex("^[-*_]{3,}\\s*$")) -> {
-                flush()
-                blocks.add(MdBlock.HorizontalRule)
-            }
-            else -> {
-                if (buf.isNotEmpty()) buf.append('\n')
-                buf.append(t)
-            }
-        }
-    }
-    flush()
-    return blocks
-}
-
-private fun buildInlineMarkdown(
-    text: String,
-    baseColor: Color,
-    codeColor: Color,
-    codeBgColor: Color
-): AnnotatedString {
-    if (!text.contains('*') && !text.contains('`') && !text.contains('~') && !text.contains('[')) {
-        return AnnotatedString(text)
-    }
-
-    val spans = mutableListOf<InlineSpan>()
-    Regex("`([^`]+)`").findAll(text).forEach {
-        spans.add(InlineSpan(it.range.first, it.range.last + 1, it.groupValues[1], "code"))
-    }
-    Regex("\\*\\*(.+?)\\*\\*").findAll(text).forEach {
-        spans.add(InlineSpan(it.range.first, it.range.last + 1, it.groupValues[1], "bold"))
-    }
-    Regex("(?<!\\*)\\*(?!\\*)(.+?)(?<!\\*)\\*(?!\\*)").findAll(text).forEach {
-        spans.add(InlineSpan(it.range.first, it.range.last + 1, it.groupValues[1], "italic"))
-    }
-    Regex("~~(.+?)~~").findAll(text).forEach {
-        spans.add(InlineSpan(it.range.first, it.range.last + 1, it.groupValues[1], "strike"))
-    }
-    Regex("\\[([^\\]]+)]\\(([^)]+)\\)").findAll(text).forEach {
-        spans.add(InlineSpan(it.range.first, it.range.last + 1, it.groupValues[1], "link", it.groupValues[2]))
-    }
-
-    if (spans.isEmpty()) return AnnotatedString(text)
-
-    val sorted = spans.sortedBy { it.start }
-    val filtered = mutableListOf<InlineSpan>()
-    var lastEnd = 0
-    for (s in sorted) {
-        if (s.start >= lastEnd) { filtered.add(s); lastEnd = s.end }
-    }
-
-    return buildAnnotatedString {
-        var pos = 0
-        for (s in filtered) {
-            if (pos < s.start) append(text.substring(pos, s.start))
-            when (s.type) {
-                "bold" -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(s.content) }
-                "italic" -> withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(s.content) }
-                "code" -> withStyle(SpanStyle(
-                    fontFamily = FontFamily.Monospace,
-                    background = codeBgColor,
-                    color = codeColor
-                )) { append("\u00A0${s.content}\u00A0") }
-                "strike" -> withStyle(SpanStyle(textDecoration = TextDecoration.LineThrough)) { append(s.content) }
-                "link" -> {
-                    pushStringAnnotation(tag = "URL", annotation = s.url)
-                    withStyle(SpanStyle(
-                        color = codeColor,
-                        textDecoration = TextDecoration.Underline
-                    )) { append(s.content) }
-                    pop()
-                }
-            }
-            pos = s.end
-        }
-        if (pos < text.length) append(text.substring(pos))
-    }
-}
-
-private data class InlineSpan(val start: Int, val end: Int, val content: String, val type: String, val url: String = "")
+// ── Markdown Rendering (delegated to shared component) ──
 
 @Composable
 private fun MarkdownText(
@@ -1029,159 +884,7 @@ private fun MarkdownText(
     style: TextStyle = MaterialTheme.typography.bodyMedium.copy(lineHeight = 22.sp),
     color: Color = MaterialTheme.colorScheme.onSurface
 ) {
-    val blocks = remember(text) { parseMarkdownBlocks(text) }
-    val codeBg = MaterialTheme.colorScheme.surfaceContainerHighest
-    val codeColor = MaterialTheme.colorScheme.primary
-    val uriHandler = LocalUriHandler.current
-    val dividerColor = MaterialTheme.colorScheme.outlineVariant
-
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (block in blocks) {
-            when (block) {
-                is MdBlock.Header -> {
-                    val hs = when (block.level) {
-                        1 -> style.copy(fontSize = 18.sp, fontWeight = FontWeight.Bold, lineHeight = 26.sp)
-                        2 -> style.copy(fontSize = 16.sp, fontWeight = FontWeight.Bold, lineHeight = 24.sp)
-                        3 -> style.copy(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, lineHeight = 22.sp)
-                        else -> style.copy(fontWeight = FontWeight.SemiBold)
-                    }
-                    Spacer(modifier = Modifier.height(2.dp))
-                    val annotated = buildInlineMarkdown(block.text, color, codeColor, codeBg)
-                    ClickableInlineText(annotated, hs, color, uriHandler)
-                }
-                is MdBlock.BulletItem -> {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                        Text(
-                            "\u2022",
-                            style = style,
-                            color = color.copy(alpha = 0.5f),
-                            modifier = Modifier.width(16.dp),
-                            textAlign = TextAlign.Center
-                        )
-                        val annotated = buildInlineMarkdown(block.text, color, codeColor, codeBg)
-                        ClickableInlineText(annotated, style, color, uriHandler, Modifier.weight(1f))
-                    }
-                }
-                is MdBlock.NumberedItem -> {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-                        Text(
-                            "${block.number}.",
-                            style = style.copy(fontFeatureSettings = "tnum"),
-                            color = color.copy(alpha = 0.5f),
-                            modifier = Modifier.width(22.dp),
-                            textAlign = TextAlign.End
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        val annotated = buildInlineMarkdown(block.text, color, codeColor, codeBg)
-                        ClickableInlineText(annotated, style, color, uriHandler, Modifier.weight(1f))
-                    }
-                }
-                is MdBlock.Quote -> {
-                    Row(
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .width(3.dp)
-                                .heightIn(min = 20.dp)
-                                .background(codeColor.copy(alpha = 0.4f), RoundedCornerShape(2.dp))
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        val annotated = buildInlineMarkdown(block.text, color.copy(alpha = 0.7f), codeColor, codeBg)
-                        ClickableInlineText(
-                            annotated,
-                            style.copy(fontStyle = FontStyle.Italic),
-                            color.copy(alpha = 0.7f),
-                            uriHandler,
-                            Modifier.weight(1f)
-                        )
-                    }
-                }
-                is MdBlock.Table -> {
-                    Surface(
-                        shape = RoundedCornerShape(10.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerLow,
-                        border = BorderStroke(0.5.dp, dividerColor)
-                    ) {
-                        Column {
-                            // Header row
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.5f))
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                block.headers.forEach { header ->
-                                    Text(
-                                        text = buildInlineMarkdown(header, color, codeColor, codeBg),
-                                        style = style.copy(fontWeight = FontWeight.SemiBold, fontSize = 13.sp),
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                }
-                            }
-                            HorizontalDivider(color = dividerColor, thickness = 0.5.dp)
-                            // Data rows
-                            block.rows.forEachIndexed { rowIdx, row ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 7.dp)
-                                ) {
-                                    block.headers.forEachIndexed { idx, _ ->
-                                        val cell = row.getOrElse(idx) { "" }
-                                        Text(
-                                            text = buildInlineMarkdown(cell, color, codeColor, codeBg),
-                                            style = style.copy(fontSize = 13.sp),
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    }
-                                }
-                                if (rowIdx < block.rows.size - 1) {
-                                    HorizontalDivider(color = dividerColor.copy(alpha = 0.5f), thickness = 0.5.dp)
-                                }
-                            }
-                        }
-                    }
-                }
-                MdBlock.HorizontalRule -> {
-                    HorizontalDivider(
-                        modifier = Modifier.padding(vertical = 4.dp),
-                        color = dividerColor
-                    )
-                }
-                is MdBlock.Paragraph -> {
-                    val annotated = buildInlineMarkdown(block.text, color, codeColor, codeBg)
-                    ClickableInlineText(annotated, style, color, uriHandler)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ClickableInlineText(
-    annotated: AnnotatedString,
-    style: TextStyle,
-    color: Color,
-    uriHandler: androidx.compose.ui.platform.UriHandler,
-    modifier: Modifier = Modifier
-) {
-    val hasLinks = annotated.getStringAnnotations("URL", 0, annotated.length).isNotEmpty()
-    if (hasLinks) {
-        @Suppress("DEPRECATION")
-        androidx.compose.foundation.text.ClickableText(
-            text = annotated,
-            style = style.copy(color = color),
-            modifier = modifier,
-            onClick = { offset ->
-                annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let {
-                    try { uriHandler.openUri(it.item) } catch (_: Exception) { }
-                }
-            }
-        )
-    } else {
-        Text(text = annotated, style = style, color = color, modifier = modifier)
-    }
+    com.example.link_pi.ui.common.MarkdownText(text = text, style = style, color = color)
 }
 
 // ── Collapsible Code Block ──
@@ -1683,6 +1386,80 @@ private fun AgentStepsCard(steps: List<AgentStep>) {
             ) {
                 steps.forEachIndexed { idx, step ->
                     AgentStepRow(step, isLast = idx == steps.size - 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SshModePromptCard(
+    sessionId: String,
+    onEnter: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Color(0xFF0D1117),
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3FB950).copy(alpha = 0.4f)),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🖥️", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "SSH 已连接",
+                    style = MaterialTheme.typography.titleSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = Color(0xFF3FB950)
+                    )
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "已成功连接到服务器。是否进入 SSH 终端模式？\n终端模式下 AI 将专注于命令生成和执行。",
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    color = Color(0xFF8B949E)
+                )
+            )
+            Spacer(Modifier.height(12.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Surface(
+                    onClick = onEnter,
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF3FB950).copy(alpha = 0.15f),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        "进入终端模式",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFF3FB950)
+                        ),
+                        modifier = Modifier.padding(vertical = 10.dp).fillMaxWidth(),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+                Surface(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF30363D),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        "留在对话",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = FontFamily.Monospace,
+                            color = Color(0xFF8B949E)
+                        ),
+                        modifier = Modifier.padding(vertical = 10.dp).fillMaxWidth(),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
                 }
             }
         }

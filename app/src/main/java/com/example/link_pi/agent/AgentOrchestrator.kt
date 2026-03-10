@@ -79,13 +79,8 @@ class AgentOrchestrator(
             onStep(AgentStep(StepType.THINKING, "意图: $overrideIntent (预设)"))
             overrideIntent
         } else {
-            onStep(AgentStep(StepType.THINKING, "正在分析请求..."))
             val hasActiveWorkspace = toolExecutor.latestAppHint != null
-            val classified = try {
-                IntentClassifier.classify(userMessage, hasActiveWorkspace, skill, aiService)
-            } catch (_: Exception) {
-                UserIntent.CONVERSATION
-            }
+            val classified = IntentClassifier.classifyLocal(userMessage, hasActiveWorkspace)
             onStep(AgentStep(StepType.THINKING, "意图识别: $classified"))
             classified
         }
@@ -192,6 +187,17 @@ class AgentOrchestrator(
                 // For non-app intents (CONVERSATION etc.), break out of planning loop
                 // Apps are only generated through the workbench, never inline in chat
                 if (!intent.needsApp()) {
+                    // Capture thinking content if present
+                    if (chatResp.thinkingContent.isNotBlank()) {
+                        latestThinking = chatResp.thinkingContent
+                    }
+                    // Fallback: if content is blank but thinking has substance, use it
+                    var finalResp = response
+                    if (finalResp.isBlank() && chatResp.thinkingContent.length > 200) {
+                        finalResp = chatResp.thinkingContent
+                    }
+                    // Add AI response to messages so it's available after the loop
+                    messages.add(mapOf("role" to "assistant", "content" to finalResp))
                     break
                 }
                 // Move to generation phase (or return text for non-app intents)
@@ -227,6 +233,7 @@ class AgentOrchestrator(
             val resultParts = StringBuilder()
             var hasFailure = false
             var allEditsFailed = true // Track if every file-edit tool in this round failed
+            toolExecutor.toolProgressCallback = onStepSync
             for (call in toolCalls) {
                 if (call.toolName in FILE_TOOLS) usedFileTools = true
 
@@ -248,6 +255,7 @@ class AgentOrchestrator(
                 resultParts.appendLine(result.result)
                 resultParts.appendLine("</tool_result>")
             }
+            toolExecutor.toolProgressCallback = null
 
             // Track consecutive rounds where file edits all failed
             val hadFileEdits = toolCalls.any { it.toolName in FILE_TOOLS }
@@ -268,6 +276,16 @@ class AgentOrchestrator(
                 }
             }
             messages.add(mapOf("role" to "user", "content" to resultParts.toString()))
+
+            // ── Check for workbench redirect from launch_workbench tool ──
+            toolExecutor.pendingWorkbenchRedirect?.let { redirect ->
+                toolExecutor.pendingWorkbenchRedirect = null
+                onStep(AgentStep(StepType.FINAL_RESPONSE, "已弹出工作台引导", redirect.title))
+                return OrchestratorResult(
+                    "", null, toolIterations, latestThinking,
+                    workbenchRedirect = redirect
+                )
+            }
         }
 
         // If all work was done via file tools, run self-check then return
@@ -888,7 +906,7 @@ class AgentOrchestrator(
         onStepSync: ((AgentStep) -> Unit)?
     ): ChatResponse {
         val thinkingLabel = "💡 $label 思考中..."
-        val maxStreamRetries = 2
+        val maxStreamRetries = 6
         var lastException: Exception? = null
         for (attempt in 0..maxStreamRetries) {
             try {
@@ -906,9 +924,16 @@ class AgentOrchestrator(
             } catch (e: java.io.IOException) {
                 lastException = e
                 if (attempt < maxStreamRetries) {
-                    val delayMs = (attempt + 1) * 3000L
-                    onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络中断，${delayMs / 1000}s后重试...", ""))
-                    kotlinx.coroutines.delay(delayMs)
+                    onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络中断，等待网络恢复(${attempt + 1}/$maxStreamRetries)...", ""))
+                    // Wait for network to come back (up to 60s), then add a small extra delay
+                    val recovered = com.example.link_pi.network.AiService.waitForNetwork(60_000)
+                    if (recovered) {
+                        onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络已恢复，重新连接...", ""))
+                        kotlinx.coroutines.delay(1000)
+                    } else {
+                        // Even if not detected, still retry - ping may be blocked
+                        kotlinx.coroutines.delay(5000)
+                    }
                     continue
                 }
                 throw e
@@ -923,5 +948,6 @@ data class OrchestratorResult(
     val finalResponse: String,
     val miniApp: com.example.link_pi.data.model.MiniApp?,
     val steps: Int,
-    val thinkingContent: String = ""
+    val thinkingContent: String = "",
+    val workbenchRedirect: WorkbenchRedirect? = null
 )

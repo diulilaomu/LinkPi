@@ -78,6 +78,10 @@ import com.example.link_pi.ui.settings.ModelManageScreen
 import com.example.link_pi.ui.settings.ModuleScreen
 import com.example.link_pi.ui.settings.SettingsScreen
 import com.example.link_pi.ui.settings.ShareScreen
+import com.example.link_pi.ui.permission.PermissionScreen
+import com.example.link_pi.ui.permission.allPermissionsGranted
+import com.example.link_pi.ui.ssh.SshScreen
+import com.example.link_pi.ui.ssh.SshViewModel
 import com.example.link_pi.ui.skill.SkillListScreen
 import com.example.link_pi.ui.workbench.WorkbenchDetailScreen
 import com.example.link_pi.ui.workbench.WorkbenchListScreen
@@ -97,17 +101,26 @@ sealed class Screen(val route: String, val title: String) {
     data object ModuleSettings : Screen("settings/modules", "模块管理")
     data object CredentialSettings : Screen("settings/credentials", "凭据管理")
     data object ShareSettings : Screen("settings/share", "本地分享")
+    data object SshMode : Screen("ssh_mode", "SSH Terminal")
 }
 
 @Composable
 fun LinkPiApp() {
+    val context = LocalContext.current
+    var permissionsHandled by remember { mutableStateOf(allPermissionsGranted(context)) }
+
+    if (!permissionsHandled) {
+        PermissionScreen(onAllGranted = { permissionsHandled = true })
+        return
+    }
+
     val chatViewModel: ChatViewModel = viewModel()
     val workbenchViewModel: WorkbenchViewModel = viewModel()
+    val sshViewModel: SshViewModel = viewModel()
     var currentPage by remember { mutableStateOf<String>(Screen.Chat.route) }
     var editModelId by remember { mutableStateOf("") }
     var activeDetailTaskId by remember { mutableStateOf("") }
     var lastBackTime by remember { mutableLongStateOf(0L) }
-    val context = LocalContext.current
     var showConversationList by remember { mutableStateOf(false) }
 
     // Back handler: sub-pages go back to parent, main page requires double-back to exit
@@ -136,6 +149,18 @@ fun LinkPiApp() {
             Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
             else -> currentPage = Screen.Chat.route
         }
+    }
+
+    // SSH mode: full-screen terminal
+    if (currentPage == Screen.SshMode.route) {
+        SshScreen(
+            viewModel = sshViewModel,
+            onBack = {
+                sshViewModel.disconnect()
+                currentPage = Screen.Chat.route
+            }
+        )
+        return
     }
 
     // MiniApp has its own full-screen layout
@@ -287,6 +312,10 @@ fun LinkPiApp() {
                     onRunApp = { app ->
                         chatViewModel.setCurrentApp(app)
                         currentPage = Screen.MiniApp.route
+                    },
+                    onEnterSshMode = { sessionId ->
+                        sshViewModel.enterSession(sessionId)
+                        currentPage = Screen.SshMode.route
                     },
                     onNavigateWorkbench = { req ->
                         val taskId = workbenchViewModel.createAndRun(

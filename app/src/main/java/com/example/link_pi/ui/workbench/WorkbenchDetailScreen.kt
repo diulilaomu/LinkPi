@@ -605,12 +605,13 @@ private fun WorkspaceTabContent(
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
+                    enabled = !isBusy,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 4.dp),
                     placeholder = {
                         Text(
-                            "描述你想要的修改...",
+                            if (isBusy) "正在生成中…" else "描述你想要的修改...",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )

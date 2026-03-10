@@ -128,6 +128,15 @@ data class ToolResult(
 )
 
 /**
+ * Signal from AI to redirect user to the Workbench.
+ */
+data class WorkbenchRedirect(
+    val title: String,
+    val prompt: String,
+    val appId: String? = null
+)
+
+/**
  * One step in the agent's execution trace.
  */
 data class AgentStep(

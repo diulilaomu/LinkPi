@@ -44,7 +44,11 @@ class ToolExecutor(
     /** Dynamic module storage. */
     val moduleStorage = ModuleStorage(context)
     /** SSH session manager. */
-    val sshManager = SshManager(context)
+    val sshManager = SshManager.getInstance(context)
+    /** Pending workbench redirect — set when AI calls launch_workbench. */
+    var pendingWorkbenchRedirect: WorkbenchRedirect? = null
+    /** Progress callback for long-running tools (SSH exec). Set by orchestrator. */
+    var toolProgressCallback: ((AgentStep) -> Unit)? = null
     private val httpClient get() = ModuleStorage.httpClient
 
     /** Common tool name aliases the AI may hallucinate. */
@@ -71,6 +75,8 @@ class ToolExecutor(
         "ssh_execute" to "ssh_exec",
         "sshDisconnect" to "ssh_disconnect",
         "ssh_close" to "ssh_disconnect",
+        "create_app" to "launch_workbench",
+        "open_workbench" to "launch_workbench",
     )
 
     /** All tool definitions the AI can use. */
@@ -363,16 +369,26 @@ class ToolExecutor(
             listOf(ToolParam("path", "string", "文件相对路径"))
         ),
 
+        // ── Workbench ──
+        ToolDef(
+            "launch_workbench", "当用户要求创建或修改应用时，调用此工具弹出工作台引导卡片，让用户确认后进入工作台。这是创建/修改应用的唯一入口",
+            listOf(
+                ToolParam("title", "string", "应用标题（简短概括，如'天气应用'）"),
+                ToolParam("prompt", "string", "用户的完整需求描述"),
+                ToolParam("app_id", "string", "如果是修改已有应用，传入app_id", required = false)
+            )
+        ),
+
         // ── SSH Tools ──
         ToolDef(
-            "ssh_connect", "连接到SSH服务器。支持密码认证和密钥认证，可通过凭据管理器获取认证信息",
+            "ssh_connect", "连接SSH服务器。三种认证方式：1)credential_name从凭据管理器获取用户名+密码 2)username+password 3)username+private_key。推荐优先使用凭据管理器",
             listOf(
                 ToolParam("host", "string", "SSH服务器地址（IP或域名）"),
                 ToolParam("port", "string", "端口号，默认22", required = false),
-                ToolParam("username", "string", "用户名"),
-                ToolParam("password", "string", "密码（与private_key二选一）", required = false),
-                ToolParam("private_key", "string", "SSH私钥内容（PEM格式，与password二选一）", required = false),
-                ToolParam("credential_name", "string", "凭据名称（从凭据管理器获取用户名和密码）", required = false)
+                ToolParam("username", "string", "用户名（使用credential_name时可省略，会从凭据获取）", required = false),
+                ToolParam("password", "string", "密码（与private_key/credential_name三选一）", required = false),
+                ToolParam("private_key", "string", "SSH私钥内容（PEM格式）", required = false),
+                ToolParam("credential_name", "string", "凭据名称，从凭据管理器自动获取用户名和密码", required = false)
             )
         ),
         ToolDef(
@@ -380,7 +396,7 @@ class ToolExecutor(
             listOf(
                 ToolParam("session_id", "string", "SSH会话ID（从ssh_connect获取）"),
                 ToolParam("command", "string", "要执行的Shell命令"),
-                ToolParam("timeout", "string", "命令超时（毫秒），默认30000", required = false)
+                ToolParam("timeout", "string", "命令超时（毫秒），默认300000，最大600000", required = false)
             )
         ),
         ToolDef(
@@ -425,10 +441,14 @@ class ToolExecutor(
     )
 
     suspend fun execute(call: ToolCall): ToolResult {
-        return withTimeoutOrNull(60_000L) {
+        // SSH commands need much longer timeouts (up to 10 min)
+        val timeoutMs = if (call.toolName in SSH_LONG_TOOLS) 600_000L else 60_000L
+        return withTimeoutOrNull(timeoutMs) {
             executeInternal(call)
-        } ?: ToolResult(call.toolName, false, "Error: 工具执行超时 (60s)")
+        } ?: ToolResult(call.toolName, false, "Error: 工具执行超时 (${timeoutMs / 1000}s)")
     }
+
+    private val SSH_LONG_TOOLS = setOf("ssh_exec")
 
     private suspend fun executeInternal(call: ToolCall): ToolResult = withContext(Dispatchers.IO) {
         try {
@@ -497,6 +517,8 @@ class ToolExecutor(
                 "list_modules" -> executeListModules()
                 "update_module" -> executeUpdateModule(args)
                 "delete_module" -> executeDeleteModule(args)
+                // Workbench
+                "launch_workbench" -> executeLaunchWorkbench(args)
                 // SSH tools
                 "ssh_connect" -> executeSshConnect(args)
                 "ssh_exec" -> executeSshExec(args)
@@ -1073,6 +1095,17 @@ $examples
         else "Error: 模块 $moduleId 未找到。"
     }
 
+    // ── Workbench Tool ──
+
+    private fun executeLaunchWorkbench(args: Map<String, String>): String {
+        val title = args["title"]?.takeIf { it.isNotBlank() } ?: "新应用"
+        val prompt = args["prompt"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: prompt is required"
+        val appId = args["app_id"]?.takeIf { it.isNotBlank() }
+        pendingWorkbenchRedirect = WorkbenchRedirect(title, prompt, appId)
+        return "WORKBENCH_REDIRECT"
+    }
+
     // ── SSH Tool Implementations ──
 
     private fun executeSshConnect(args: Map<String, String>): String {
@@ -1091,8 +1124,12 @@ $examples
             ?: return "Error: session_id is required"
         val command = args["command"]?.takeIf { it.isNotBlank() }
             ?: return "Error: command is required"
-        val timeout = args["timeout"]?.toIntOrNull() ?: 30_000
-        return sshManager.exec(sessionId, command, timeout.coerceIn(1000, 120_000))
+        val timeout = args["timeout"]?.toIntOrNull() ?: 300_000
+        return sshManager.exec(sessionId, command, timeout.coerceIn(1000, 600_000)) { liveOutput ->
+            toolProgressCallback?.invoke(
+                AgentStep(StepType.TOOL_RESULT, "ssh> $command", liveOutput)
+            )
+        }
     }
 
     private fun executeSshDisconnect(args: Map<String, String>): String {

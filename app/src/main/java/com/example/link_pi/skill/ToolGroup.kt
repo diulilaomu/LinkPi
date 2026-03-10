@@ -59,6 +59,7 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "get_current_time" to ToolGroup.CORE,
     "calculate" to ToolGroup.CORE,
     "show_toast" to ToolGroup.CORE,
+    "launch_workbench" to ToolGroup.CORE,
     // MEMORY
     "memory_save" to ToolGroup.MEMORY,
     "memory_search" to ToolGroup.MEMORY,

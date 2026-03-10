@@ -9,7 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.link_pi.agent.AgentOrchestrator
 import com.example.link_pi.agent.AgentStep
 import com.example.link_pi.agent.MemoryExtractor
+import com.example.link_pi.agent.StepType
 import com.example.link_pi.agent.ToolExecutor
+import com.example.link_pi.agent.WorkbenchRedirect
 import com.example.link_pi.data.ConversationStorage
 import com.example.link_pi.data.model.Attachment
 import com.example.link_pi.data.model.ChatMessage
@@ -22,9 +24,7 @@ import com.example.link_pi.network.AiConfig
 import com.example.link_pi.network.AiService
 import com.example.link_pi.network.ModelConfig
 import com.example.link_pi.skill.BuiltInSkills
-import com.example.link_pi.skill.IntentClassifier
 import com.example.link_pi.skill.SkillStorage
-import com.example.link_pi.skill.UserIntent
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -93,6 +93,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _pendingWorkbench = MutableStateFlow<WorkbenchRequest?>(null)
     val pendingWorkbench: StateFlow<WorkbenchRequest?> = _pendingWorkbench.asStateFlow()
+
+    /** Pending SSH session that user can enter SSH mode for. */
+    private val _pendingSshSession = MutableStateFlow<String?>(null)
+    val pendingSshSession: StateFlow<String?> = _pendingSshSession.asStateFlow()
+
+    /** Get active SSH sessions from ToolExecutor. */
+    fun getActiveSshSessions() = toolExecutor.sshManager.getActiveSessions()
+
+    /** Dismiss the SSH mode prompt. */
+    fun dismissSshPrompt() { _pendingSshSession.value = null }
 
     init {
         // 启动时加载会话列表并恢复最近会话
@@ -266,34 +276,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        // Quick local intent check — redirect app intents to workbench
-        val hasActiveWorkspace = toolExecutor.latestAppHint != null || currentMiniApp != null
-        val localIntent = IntentClassifier.classifyLocal(userInput, hasActiveWorkspace)
-        if (localIntent == UserIntent.CREATE_APP || localIntent == UserIntent.MODIFY_APP) {
-            val title = userInput.take(30).replace("\n", " ").trim()
-            val existingAppId = if (localIntent == UserIntent.MODIFY_APP) {
-                toolExecutor.latestAppHint ?: currentMiniApp?.id
-            } else null
-            _pendingWorkbench.value = WorkbenchRequest(
-                userPrompt = userInput,
-                title = if (localIntent == UserIntent.MODIFY_APP) "修改：$title" else title,
-                modelId = aiConfig.activeModelId,
-                enableThinking = _deepThinking.value,
-                appId = existingAppId
-            )
-            return
-        }
-
         launchOrchestrator()
     }
 
-    /** Dismiss the workbench confirmation card — fall back to normal conversation. */
+    /** Dismiss the workbench confirmation card — just show a cancellation message. */
     fun dismissWorkbench() {
         val req = _pendingWorkbench.value
         _pendingWorkbench.value = null
         if (req != null) {
-            // Re-send as normal conversation
-            launchOrchestrator()
+            val msg = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = "assistant",
+                content = "已取消生成「${req.title}」。如果需要，可以随时再告诉我 😊"
+            )
+            _messages.update { it + msg }
+            saveCurrentConversation()
         }
     }
 
@@ -349,6 +346,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     onStepSync = syncStepCallback
                 )
 
+                // AI called launch_workbench → show guidance card instead of normal response
+                result.workbenchRedirect?.let { redirect ->
+                    _pendingWorkbench.value = WorkbenchRequest(
+                        userPrompt = redirect.prompt,
+                        title = redirect.title,
+                        modelId = aiConfig.activeModelId,
+                        enableThinking = _deepThinking.value,
+                        appId = redirect.appId
+                    )
+                    _agentSteps.value = emptyList()
+                    return@launch
+                }
+
                 val assistantMessage = ChatMessage(
                     id = UUID.randomUUID().toString(),
                     role = "assistant",
@@ -359,6 +369,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _messages.update { it + assistantMessage }
                 _agentSteps.value = emptyList()
+
+                // Detect if SSH was connected → offer SSH mode
+                val sshStepConnected = collectedSteps.any {
+                    it.type == StepType.TOOL_RESULT &&
+                    it.description.startsWith("✓ ssh_connect") &&
+                    it.detail.contains("session_id")
+                }
+                if (sshStepConnected) {
+                    val sessions = toolExecutor.sshManager.getActiveSessions()
+                    if (sessions.isNotEmpty()) {
+                        _pendingSshSession.value = sessions.last().sessionId
+                    }
+                }
 
                 saveCurrentConversation()
 
@@ -410,59 +433,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val apiMessages = buildApiMessages()
-                val collectedSteps = mutableListOf<AgentStep>()
-                val lastApp = _messages.value.lastOrNull { it.miniApp != null }?.miniApp
-                toolExecutor.latestAppHint = lastApp?.id ?: currentMiniApp?.id
-
-                val syncCb: (AgentStep) -> Unit = { step ->
-                    synchronized(collectedSteps) {
-                        val last = collectedSteps.lastOrNull()
-                        if (last != null && last.description == step.description) {
-                            collectedSteps[collectedSteps.size - 1] = step
-                        } else {
-                            collectedSteps.add(step)
-                        }
-                    }
-                    _agentSteps.value = synchronized(collectedSteps) { collectedSteps.toList() }
-                }
-                val regenInjectionSkills = withContext(Dispatchers.IO) {
-                    skillStorage.loadAll().filter { it.intentInjections.isNotEmpty() && !it.isBuiltIn }
-                }
-                val result = orchestrator.run(apiMessages, _activeSkill.value, _deepThinking.value,
-                    injectionSkills = regenInjectionSkills,
-                    onStep = { step ->
-                        synchronized(collectedSteps) { collectedSteps.add(step) }
-                        _agentSteps.value = synchronized(collectedSteps) { collectedSteps.toList() }
-                    },
-                    onStepSync = syncCb
-                )
-
-                val assistantMessage = ChatMessage(
-                    id = UUID.randomUUID().toString(),
-                    role = "assistant",
-                    content = result.finalResponse,
-                    miniApp = result.miniApp,
-                    agentSteps = synchronized(collectedSteps) { collectedSteps.toList() },
-                    thinkingContent = result.thinkingContent
-                )
-                _messages.update { it + assistantMessage }
-                _agentSteps.value = emptyList()
-
-                saveCurrentConversation()
-
-                viewModelScope.launch {
-                    try { memoryExtractor.extract(userInput, result.finalResponse) } catch (_: Exception) { }
-                }
-            } catch (e: Exception) {
-                _error.value = "请求失败: ${e.message}"
-            } finally {
-                _isLoading.value = false
-            }
-        }
+        launchOrchestrator()
     }
 
     private fun buildApiMessages(): List<Map<String, String>> {

@@ -9,6 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.IOException
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 private const val MAX_RETRIES = 3
@@ -38,15 +39,51 @@ class AiService(private val config: AiConfig) {
         private const val REASONING_PREVIEW_CHARS = 2_000
         private const val THINKING_EMIT_STEP = 160
         private const val CONTENT_EMIT_STEP = 160
+
+        /**
+         * Singleton OkHttpClient shared across ALL AiService instances.
+         * This ensures connection pooling actually works and TCP connections
+         * are reused, which is critical when the app is backgrounded.
+         */
+        val sharedClient: okhttp3.OkHttpClient = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectionPool(okhttp3.ConnectionPool(5, 10, TimeUnit.MINUTES))
+            .socketFactory(KeepAliveSocketFactory())
+            .build()
+
+        /**
+         * Streaming-specific client with extended read timeout for SSE.
+         * Deep thinking models may pause for minutes between SSE events.
+         * Mobile NAT/proxy can drop idle connections, so we use a very
+         * long read timeout (15 min) and no call timeout.
+         */
+        val streamingClient: okhttp3.OkHttpClient = sharedClient.newBuilder()
+            .readTimeout(900, TimeUnit.SECONDS)  // 15 min — deep thinking can be slow
+            .callTimeout(0, TimeUnit.SECONDS)     // no overall call timeout for streaming
+            .build()
+
+        /** Quick check: can we reach any DNS server? Indicates network is available. */
+        fun isNetworkReachable(): Boolean = try {
+            InetAddress.getByName("8.8.8.8").isReachable(2000)
+        } catch (_: Exception) { false }
+
+        /** Suspend until network appears reachable or timeout (ms) elapses. */
+        suspend fun waitForNetwork(timeoutMs: Long = 60_000): Boolean = withContext(Dispatchers.IO) {
+            val deadline = System.currentTimeMillis() + timeoutMs
+            while (System.currentTimeMillis() < deadline) {
+                if (isNetworkReachable()) return@withContext true
+                Thread.sleep(2000)
+            }
+            false
+        }
     }
 
-    // Separate client for AI API calls — allows redirects (some API gateways redirect)
-    private val client = okhttp3.OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .build()
+    private val client get() = sharedClient
 
     /** Convenience method — returns content string only (for backward compat). */
     suspend fun chat(
@@ -119,6 +156,8 @@ class AiService(private val config: AiConfig) {
             } catch (e: IOException) {
                 lastException = e
                 if (attempt < MAX_RETRIES) {
+                    // Wait for network recovery instead of blind backoff
+                    waitForNetwork(30_000)
                     Thread.sleep(BACKOFF_MS[attempt])
                     continue
                 }
@@ -167,7 +206,7 @@ class AiService(private val config: AiConfig) {
         var lastException: Exception? = null
         for (attempt in 0..MAX_RETRIES) {
             try {
-                val resp = client.newCall(request).execute()
+                val resp = streamingClient.newCall(request).execute()
                 if (resp.isSuccessful) {
                     successResponse = resp
                     break
@@ -183,6 +222,7 @@ class AiService(private val config: AiConfig) {
             } catch (e: IOException) {
                 lastException = e
                 if (attempt < MAX_RETRIES) {
+                    waitForNetwork(30_000)
                     Thread.sleep(BACKOFF_MS[attempt])
                     continue
                 }

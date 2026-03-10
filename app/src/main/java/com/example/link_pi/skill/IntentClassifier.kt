@@ -66,7 +66,9 @@ object IntentClassifier {
                 val truncated = message.take(300)
                 val prompt = buildPrompt(truncated, hasActiveWorkspace, skill)
                 val result = aiService.chat(prompt, maxTokens = 10)
-                UserIntent.valueOf(result.trim().uppercase().replace(" ", "_"))
+                val raw = UserIntent.valueOf(result.trim().uppercase().replace(" ", "_"))
+                // CREATE_APP / MODIFY_APP are handled via launch_workbench tool, not intent
+                if (raw == UserIntent.CREATE_APP || raw == UserIntent.MODIFY_APP) UserIntent.CONVERSATION else raw
             } catch (e: Exception) {
                 Log.w("IntentClassifier", "AI分类失败", e)
                 null
@@ -83,13 +85,9 @@ object IntentClassifier {
 只回复类别名称，不要输出其他任何内容。
 
 类别：
-- CONVERSATION: 闲聊、提问、打招呼、询问某事是什么、讨论话题。"这是什么"、"怎么用"、"什么意思"等提问都是 CONVERSATION
-- CREATE_APP: 要求创建/构建/制作新的应用、游戏、工具、页面或交互功能。包括：有创建动词如"做一个"、"写一个"；或者直接说出应用名称如"围棋应用"、"计算器"、"天气工具"等暗示要创建的短语
-- MODIFY_APP: 想要修改/修复/更新/改进现有应用
+- CONVERSATION: 通用对话，包括闲聊、提问、创建应用、修改应用等所有常规请求。这是默认类别
 - MODULE_MGMT: 想要创建/管理 API 模块或端点
 - MEMORY_OPS: 询问或管理记忆/偏好
-
-重要：如果用户只说了一个应用/游戏/工具的名称（如"围棋应用"、"计算器"、"记事本"），应判定为 CREATE_APP。仅当用户在讨论、提问、闲聊时才选 CONVERSATION。
 
 上下文：has_active_workspace=$hasActiveWorkspace, current_skill=${skill.name}
 
@@ -103,11 +101,8 @@ object IntentClassifier {
         return when {
             MEMORY_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MEMORY_OPS
             MODULE_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MODULE_MGMT
-            hasActiveWorkspace && MODIFY_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MODIFY_APP
-            // Verb + noun: explicit creation request
-            CREATE_NOUN_KEYWORDS.any { containsKeyword(lower, it) } && CREATE_VERB_PATTERN.containsMatchIn(lower) -> UserIntent.CREATE_APP
-            // Short message with just a noun keyword (e.g. "围棋应用", "计算器游戏"): implicit creation
-            message.length <= 20 && CREATE_NOUN_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.CREATE_APP
+            // CREATE_APP / MODIFY_APP no longer classified here;
+            // AI will call launch_workbench tool when appropriate
             else -> UserIntent.CONVERSATION
         }
     }
