@@ -224,6 +224,13 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
             java.io.File(workspaceManager.getWorkspacePath(appId), "APP_INFO.json").readText()
         } catch (_: Exception) { "" }
 
+    fun refreshModels() {
+        aiConfig.reloadModels()
+        _models.value = aiConfig.getModels()
+        _activeModelId.value = aiConfig.activeModelId
+        _deepThinking.value = aiConfig.activeModel.enableThinking
+    }
+
     fun switchModel(modelId: String) {
         aiConfig.activeModelId = modelId
         _activeModelId.value = modelId

@@ -14,7 +14,8 @@ enum class ToolGroup {
     CODING,        // grep_file, grep_workspace
     DEVICE,        // get_device_info, get_battery_level, get_location, vibrate, write_clipboard
     NETWORK,       // fetch_url, save_data, load_data
-    MODULE         // create_module, add_module_endpoint, remove_module_endpoint, call_module, list_modules, update_module, delete_module
+    MODULE,        // create_module, add_module_endpoint, remove_module_endpoint, call_module, list_modules, update_module, delete_module
+    SSH            // ssh_connect, ssh_exec, ssh_disconnect, ssh_upload, ssh_download, ssh_list_remote, ssh_list_sessions, ssh_port_forward
 }
 
 /** NativeBridge API documentation groups (for generated app code, not agent tools). */
@@ -110,7 +111,16 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "call_module" to ToolGroup.MODULE,
     "list_modules" to ToolGroup.MODULE,
     "update_module" to ToolGroup.MODULE,
-    "delete_module" to ToolGroup.MODULE
+    "delete_module" to ToolGroup.MODULE,
+    // SSH
+    "ssh_connect" to ToolGroup.SSH,
+    "ssh_exec" to ToolGroup.SSH,
+    "ssh_disconnect" to ToolGroup.SSH,
+    "ssh_upload" to ToolGroup.SSH,
+    "ssh_download" to ToolGroup.SSH,
+    "ssh_list_remote" to ToolGroup.SSH,
+    "ssh_list_sessions" to ToolGroup.SSH,
+    "ssh_port_forward" to ToolGroup.SSH
 )
 
 /**

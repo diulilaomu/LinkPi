@@ -28,6 +28,10 @@
 -keep class org.java_websocket.** { *; }
 -dontwarn org.java_websocket.**
 
+# ── JSch (SSH) ──
+-keep class com.jcraft.jsch.** { *; }
+-dontwarn com.jcraft.jsch.**
+
 # ── Google Tink / errorprone annotations ──
 -dontwarn com.google.errorprone.annotations.CanIgnoreReturnValue
 -dontwarn com.google.errorprone.annotations.CheckReturnValue

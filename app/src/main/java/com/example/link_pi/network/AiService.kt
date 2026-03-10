@@ -91,32 +91,41 @@ class AiService(private val config: AiConfig) {
             .post(requestBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        var lastException: IOException? = null
+        var lastException: Exception? = null
         for (attempt in 0..MAX_RETRIES) {
-            val response = client.newCall(request).execute()
-            response.use { resp ->
-                val body = resp.body?.string() ?: throw IOException("Empty response")
+            try {
+                val response = client.newCall(request).execute()
+                response.use { resp ->
+                    val body = resp.body?.string() ?: throw IOException("Empty response")
 
-                if (resp.isSuccessful) {
-                    val json = JSONObject(body)
-                    val message = json.getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                    val content = if (message.isNull("content")) "" else message.optString("content", "")
-                    val thinking = if (message.isNull("reasoning_content")) "" else message.optString("reasoning_content", "")
-                    return@withContext ChatResponse(content, thinking)
+                    if (resp.isSuccessful) {
+                        val json = JSONObject(body)
+                        val message = json.getJSONArray("choices")
+                            .getJSONObject(0)
+                            .getJSONObject("message")
+                        val content = if (message.isNull("content")) "" else message.optString("content", "")
+                        val thinking = if (message.isNull("reasoning_content")) "" else message.optString("reasoning_content", "")
+                        return@withContext ChatResponse(content, thinking)
+                    }
+
+                    val code = resp.code
+                    if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                        lastException = IOException("API $code ($endpoint): $body")
+                        Thread.sleep(BACKOFF_MS[attempt])
+                    } else {
+                        throw IOException("API $code ($endpoint): $body")
+                    }
                 }
-
-                val code = resp.code
-                if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
-                    lastException = IOException("API $code ($endpoint): $body")
+            } catch (e: IOException) {
+                lastException = e
+                if (attempt < MAX_RETRIES) {
                     Thread.sleep(BACKOFF_MS[attempt])
-                } else {
-                    throw IOException("API $code ($endpoint): $body")
+                    continue
                 }
+                throw e
             }
         }
-        throw lastException ?: IOException("Unexpected retry exhaustion")
+        throw lastException as? IOException ?: IOException("Unexpected retry exhaustion")
     }
 
     /**
@@ -155,24 +164,33 @@ class AiService(private val config: AiConfig) {
             .build()
 
         var successResponse: okhttp3.Response? = null
-        var lastException: IOException? = null
+        var lastException: Exception? = null
         for (attempt in 0..MAX_RETRIES) {
-            val resp = client.newCall(request).execute()
-            if (resp.isSuccessful) {
-                successResponse = resp
-                break
+            try {
+                val resp = client.newCall(request).execute()
+                if (resp.isSuccessful) {
+                    successResponse = resp
+                    break
+                }
+                val code = resp.code
+                val body = resp.use { it.body?.string() ?: "" }
+                if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                    lastException = IOException("API $code ($endpoint): $body")
+                    Thread.sleep(BACKOFF_MS[attempt])
+                    continue
+                }
+                throw IOException("API $code ($endpoint): $body")
+            } catch (e: IOException) {
+                lastException = e
+                if (attempt < MAX_RETRIES) {
+                    Thread.sleep(BACKOFF_MS[attempt])
+                    continue
+                }
+                throw e
             }
-            val code = resp.code
-            val body = resp.use { it.body?.string() ?: "" }
-            if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
-                lastException = IOException("API $code ($endpoint): $body")
-                Thread.sleep(BACKOFF_MS[attempt])
-                continue
-            }
-            throw IOException("API $code ($endpoint): $body")
         }
         val safeResponse = successResponse
-            ?: throw (lastException ?: IOException("Unexpected retry exhaustion"))
+            ?: throw (lastException as? IOException ?: IOException("Unexpected retry exhaustion"))
 
         val thinkingBuf = StringBuilder()
         val contentBuf = StringBuilder()

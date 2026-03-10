@@ -43,6 +43,8 @@ class ToolExecutor(
     val memoryStorage = MemoryStorage(context)
     /** Dynamic module storage. */
     val moduleStorage = ModuleStorage(context)
+    /** SSH session manager. */
+    val sshManager = SshManager(context)
     private val httpClient get() = ModuleStorage.httpClient
 
     /** Common tool name aliases the AI may hallucinate. */
@@ -64,6 +66,11 @@ class ToolExecutor(
         "update_memory" to "memory_update",
         "list_apps" to "list_saved_apps",
         "open_workspace" to "open_app_workspace",
+        "sshConnect" to "ssh_connect",
+        "sshExec" to "ssh_exec",
+        "ssh_execute" to "ssh_exec",
+        "sshDisconnect" to "ssh_disconnect",
+        "ssh_close" to "ssh_disconnect",
     )
 
     /** All tool definitions the AI can use. */
@@ -354,6 +361,66 @@ class ToolExecutor(
         ToolDef(
             "diff_file", "对比文件当前内容与最近快照的差异，输出unified diff格式",
             listOf(ToolParam("path", "string", "文件相对路径"))
+        ),
+
+        // ── SSH Tools ──
+        ToolDef(
+            "ssh_connect", "连接到SSH服务器。支持密码认证和密钥认证，可通过凭据管理器获取认证信息",
+            listOf(
+                ToolParam("host", "string", "SSH服务器地址（IP或域名）"),
+                ToolParam("port", "string", "端口号，默认22", required = false),
+                ToolParam("username", "string", "用户名"),
+                ToolParam("password", "string", "密码（与private_key二选一）", required = false),
+                ToolParam("private_key", "string", "SSH私钥内容（PEM格式，与password二选一）", required = false),
+                ToolParam("credential_name", "string", "凭据名称（从凭据管理器获取用户名和密码）", required = false)
+            )
+        ),
+        ToolDef(
+            "ssh_exec", "在SSH服务器上执行命令，返回stdout/stderr和退出码",
+            listOf(
+                ToolParam("session_id", "string", "SSH会话ID（从ssh_connect获取）"),
+                ToolParam("command", "string", "要执行的Shell命令"),
+                ToolParam("timeout", "string", "命令超时（毫秒），默认30000", required = false)
+            )
+        ),
+        ToolDef(
+            "ssh_disconnect", "断开SSH连接",
+            listOf(ToolParam("session_id", "string", "SSH会话ID"))
+        ),
+        ToolDef(
+            "ssh_upload", "通过SFTP上传文件内容到远程服务器",
+            listOf(
+                ToolParam("session_id", "string", "SSH会话ID"),
+                ToolParam("content", "string", "要上传的文件内容"),
+                ToolParam("remote_path", "string", "远程文件路径（如 /home/user/file.txt）")
+            )
+        ),
+        ToolDef(
+            "ssh_download", "通过SFTP从远程服务器下载文件内容",
+            listOf(
+                ToolParam("session_id", "string", "SSH会话ID"),
+                ToolParam("remote_path", "string", "远程文件路径")
+            )
+        ),
+        ToolDef(
+            "ssh_list_remote", "列出远程服务器目录内容（SFTP）",
+            listOf(
+                ToolParam("session_id", "string", "SSH会话ID"),
+                ToolParam("path", "string", "远程目录路径，默认当前目录", required = false)
+            )
+        ),
+        ToolDef(
+            "ssh_list_sessions", "列出所有活跃的SSH会话",
+            emptyList()
+        ),
+        ToolDef(
+            "ssh_port_forward", "设置SSH本地端口转发（SSH隧道）",
+            listOf(
+                ToolParam("session_id", "string", "SSH会话ID"),
+                ToolParam("local_port", "string", "本地监听端口"),
+                ToolParam("remote_host", "string", "远程目标主机（通常为127.0.0.1或localhost）"),
+                ToolParam("remote_port", "string", "远程目标端口")
+            )
         )
     )
 
@@ -430,6 +497,15 @@ class ToolExecutor(
                 "list_modules" -> executeListModules()
                 "update_module" -> executeUpdateModule(args)
                 "delete_module" -> executeDeleteModule(args)
+                // SSH tools
+                "ssh_connect" -> executeSshConnect(args)
+                "ssh_exec" -> executeSshExec(args)
+                "ssh_disconnect" -> executeSshDisconnect(args)
+                "ssh_upload" -> executeSshUpload(args)
+                "ssh_download" -> executeSshDownload(args)
+                "ssh_list_remote" -> executeSshListRemote(args)
+                "ssh_list_sessions" -> executeSshListSessions()
+                "ssh_port_forward" -> executeSshPortForward(args)
                 else -> return@withContext ToolResult(normalizedCall.toolName, false, "Error: 未知工具: ${normalizedCall.toolName}")
             }
             val success = !result.startsWith("Error:")
@@ -995,6 +1071,72 @@ $examples
             ?: return "Error: module_id is required"
         return if (moduleStorage.delete(moduleId)) "模块 $moduleId 已删除。"
         else "Error: 模块 $moduleId 未找到。"
+    }
+
+    // ── SSH Tool Implementations ──
+
+    private fun executeSshConnect(args: Map<String, String>): String {
+        val host = args["host"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: host is required"
+        val port = args["port"]?.toIntOrNull() ?: 22
+        val username = args["username"]?.takeIf { it.isNotBlank() } ?: ""
+        val password = args["password"]?.takeIf { it.isNotBlank() }
+        val privateKey = args["private_key"]?.takeIf { it.isNotBlank() }
+        val credentialName = args["credential_name"]?.takeIf { it.isNotBlank() }
+        return sshManager.connect(host, port, username, password, privateKey, credentialName)
+    }
+
+    private fun executeSshExec(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        val command = args["command"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: command is required"
+        val timeout = args["timeout"]?.toIntOrNull() ?: 30_000
+        return sshManager.exec(sessionId, command, timeout.coerceIn(1000, 120_000))
+    }
+
+    private fun executeSshDisconnect(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        return sshManager.disconnect(sessionId)
+    }
+
+    private fun executeSshUpload(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        val content = args["content"] ?: return "Error: content is required"
+        val remotePath = args["remote_path"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: remote_path is required"
+        return sshManager.upload(sessionId, content, remotePath)
+    }
+
+    private fun executeSshDownload(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        val remotePath = args["remote_path"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: remote_path is required"
+        return sshManager.download(sessionId, remotePath)
+    }
+
+    private fun executeSshListRemote(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        val path = args["path"]?.takeIf { it.isNotBlank() } ?: "."
+        return sshManager.listRemote(sessionId, path)
+    }
+
+    private fun executeSshListSessions(): String = sshManager.listSessions()
+
+    private fun executeSshPortForward(args: Map<String, String>): String {
+        val sessionId = args["session_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: session_id is required"
+        val localPort = args["local_port"]?.toIntOrNull()
+            ?: return "Error: local_port is required"
+        val remoteHost = args["remote_host"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: remote_host is required"
+        val remotePort = args["remote_port"]?.toIntOrNull()
+            ?: return "Error: remote_port is required"
+        return sshManager.portForward(sessionId, localPort, remoteHost, remotePort)
     }
 
     /**

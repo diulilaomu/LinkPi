@@ -50,9 +50,44 @@ class ModuleStorage(context: Context) {
         val endpoints: List<Endpoint> = emptyList(),
         val instructions: String = "",  // Usage instructions for AI to read
         val allowPrivateNetwork: Boolean = false,  // Allow LAN/private IP access (for DTU gateways etc.)
+        val isBuiltIn: Boolean = false,  // Built-in modules cannot be edited/deleted/shared
         val createdAt: Long = System.currentTimeMillis(),
         val updatedAt: Long = System.currentTimeMillis()
     )
+
+    companion object BuiltIns {
+        /** Built-in SSH module — visible in module list but not editable/deletable. */
+        val SSH_MODULE = Module(
+            id = "builtin_ssh",
+            name = "SSH 远程服务器",
+            description = "通过 SSH 连接远程服务器，执行命令、传输文件、端口转发。支持密码/密钥/凭据管理器认证",
+            baseUrl = "ssh://",
+            protocol = "SSH",
+            isBuiltIn = true,
+            endpoints = listOf(
+                Endpoint(name = "ssh_connect", path = "", description = "连接SSH服务器", method = "CONNECT"),
+                Endpoint(name = "ssh_exec", path = "", description = "执行远程命令", method = "EXEC"),
+                Endpoint(name = "ssh_upload", path = "", description = "SFTP上传文件", method = "PUT"),
+                Endpoint(name = "ssh_download", path = "", description = "SFTP下载文件", method = "GET"),
+                Endpoint(name = "ssh_list_remote", path = "", description = "列出远程目录", method = "LIST"),
+                Endpoint(name = "ssh_port_forward", path = "", description = "端口转发/SSH隧道", method = "FORWARD"),
+                Endpoint(name = "ssh_disconnect", path = "", description = "断开连接", method = "CLOSE"),
+                Endpoint(name = "ssh_list_sessions", path = "", description = "列出活跃会话", method = "LIST")
+            ),
+            instructions = "SSH 内置模块，通过 ssh_connect/ssh_exec/ssh_disconnect 等工具调用，不通过 call_module 调用。"
+        )
+
+        val builtInModules: List<Module> = listOf(SSH_MODULE)
+
+        val httpClient: OkHttpClient = OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
+        val ioExecutor = Executors.newFixedThreadPool(8)
+    }
 
     // ── CRUD ──
 
@@ -101,15 +136,17 @@ class ModuleStorage(context: Context) {
     }
 
     fun loadAll(): List<Module> {
-        return moduleDir.listFiles()
+        val userModules = moduleDir.listFiles()
             ?.filter { it.extension == "json" }
             ?.mapNotNull { loadFromFile(it) }
             ?.sortedByDescending { it.updatedAt }
             ?: emptyList()
+        return builtInModules + userModules
     }
 
     @Synchronized
     fun delete(id: String): Boolean {
+        if (builtInModules.any { it.id == id }) return false
         val safeId = id.replace(Regex("[^a-zA-Z0-9\\-]"), "")
         return File(moduleDir, "$safeId.json").delete()
     }
@@ -138,6 +175,7 @@ class ModuleStorage(context: Context) {
         defaultHeaders: Map<String, String>? = null,
         instructions: String? = null
     ): Module? {
+        if (builtInModules.any { it.id == id }) return null
         val module = loadById(id) ?: return null
         val updated = module.copy(
             name = name?.trim() ?: module.name,
@@ -483,16 +521,5 @@ class ModuleStorage(context: Context) {
         } catch (e: Exception) {
             return """{"error":"${e.message?.replace("\"", "'")}"}""" 
         }
-    }
-
-    companion object {
-        val httpClient: OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(60, TimeUnit.SECONDS)
-            .followRedirects(false)
-            .followSslRedirects(false)
-            .build()
-
-        val ioExecutor = Executors.newFixedThreadPool(8)
     }
 }

@@ -363,6 +363,9 @@ private fun WorkspaceTabContent(
         }
     }
 
+    // Refresh model list whenever this screen is (re)entered
+    LaunchedEffect(Unit) { viewModel.refreshModels() }
+
     val models by viewModel.models.collectAsState()
     val activeModelId by viewModel.activeModelId.collectAsState()
     val deepThinking by viewModel.deepThinking.collectAsState()

@@ -52,6 +52,7 @@ object BuiltInSkills {
 | NETWORK | fetch_url（HTTP GET）、web_search（互联网搜索）、save_data / load_data（Agent 端键值存储） |
 | MODULE | 调用动态 API 模块（create_module、call_module 等，支持 HTTP/TCP/UDP 协议，TCP/UDP 支持 hex 编码收发二进制数据，可访问局域网设备） |
 | DEVICE | get_device_info、get_battery_level、get_location、vibrate、write_clipboard |
+| SSH | ssh_connect、ssh_exec、ssh_disconnect、ssh_upload、ssh_download、ssh_list_remote、ssh_list_sessions、ssh_port_forward — 连接远程服务器，执行命令，SFTP文件传输，端口转发。支持密码/密钥/凭据管理器认证 |
 
 **NativeBridge API**（生成应用的 WebView 中可用的 JavaScript API）：
 | 组 | API |
@@ -383,6 +384,77 @@ callModule('dlt645_meter', 'read_energy', {
 - 完成模块创建/修改/查询后，直接回复结果即可，**不要**继续规划或生成应用代码
 """.trimIndent()
 
+    val SSH_WORKFLOW = """
+### SSH 远程服务器
+
+你可以通过内置的 SSH 工具连接到远程服务器，执行命令、上传/下载文件、设置端口转发。
+
+**支持的加密算法：**
+| 类型 | 算法 |
+|------|------|
+| 密钥交换 | curve25519-sha256, ecdh-sha2-nistp256/384/521, diffie-hellman-group16/18-sha512, diffie-hellman-group14-sha256 |
+| 主机密钥 | ssh-ed25519, ecdsa-sha2-nistp256/384/521, rsa-sha2-512/256, ssh-rsa |
+| 加密 | chacha20-poly1305, aes128/256-gcm, aes128/192/256-ctr, aes128/192/256-cbc |
+| MAC | hmac-sha2-256/512-etm, hmac-sha2-256/512, hmac-sha1 |
+
+**认证方式：**
+- **密码认证**：直接提供 password 参数
+- **密钥认证**：提供 private_key 参数（PEM 格式私钥内容）
+- **凭据管理器**：提供 credential_name，从凭据管理器获取用户名和密码
+
+**连接 SSH 服务器：**
+<tool_call>
+{"tool": "ssh_connect", "args": {"host": "192.168.1.100", "port": "22", "username": "root", "password": "mypassword"}}
+</tool_call>
+
+**使用凭据管理器连接：**
+<tool_call>
+{"tool": "ssh_connect", "args": {"host": "192.168.1.100", "username": "root", "credential_name": "我的服务器"}}
+</tool_call>
+
+**执行命令：**
+<tool_call>
+{"tool": "ssh_exec", "args": {"session_id": "ssh_xxx", "command": "ls -la /home"}}
+</tool_call>
+
+**上传文件：**
+<tool_call>
+{"tool": "ssh_upload", "args": {"session_id": "ssh_xxx", "content": "#!/bin/bash\necho hello", "remote_path": "/home/user/script.sh"}}
+</tool_call>
+
+**下载文件：**
+<tool_call>
+{"tool": "ssh_download", "args": {"session_id": "ssh_xxx", "remote_path": "/etc/hostname"}}
+</tool_call>
+
+**列出远程目录：**
+<tool_call>
+{"tool": "ssh_list_remote", "args": {"session_id": "ssh_xxx", "path": "/home/user"}}
+</tool_call>
+
+**端口转发（SSH隧道）：**
+<tool_call>
+{"tool": "ssh_port_forward", "args": {"session_id": "ssh_xxx", "local_port": "8080", "remote_host": "127.0.0.1", "remote_port": "3306"}}
+</tool_call>
+
+**查看当前会话：**
+<tool_call>
+{"tool": "ssh_list_sessions", "args": {}}
+</tool_call>
+
+**断开连接：**
+<tool_call>
+{"tool": "ssh_disconnect", "args": {"session_id": "ssh_xxx"}}
+</tool_call>
+
+**重要规则：**
+- 使用完毕后**务必断开连接**（ssh_disconnect），避免会话泄漏
+- 密码和私钥等敏感信息不要在回复中明文展示
+- 建议用户通过凭据管理器存储认证信息，而非在对话中直接提供密码
+- 如果用户未提供认证信息，提示其在设置→凭据管理中添加
+- 命令执行默认超时 30 秒，长时间任务可调大 timeout 参数（最大 120 秒）
+""".trimIndent()
+
     private val MEMORY_SECTION_WITH_SNAPSHOT = """
 ### 长期记忆
 
@@ -511,6 +583,13 @@ $MODIFY_APP_GEN_WORKFLOW
         isBuiltIn = true
     )
 
+    private val SYS_WF_SSH = Skill(
+        id = "sys_wf_ssh", name = "SSH远程工作流", icon = "🖥️",
+        description = "SSH连接、命令执行、文件传输与端口转发",
+        systemPrompt = SSH_WORKFLOW,
+        isBuiltIn = true
+    )
+
     private val SYS_MEMORY = Skill(
         id = "sys_memory", name = "记忆系统", icon = "🧠",
         description = "长期记忆的保存、搜索与使用规则",
@@ -531,7 +610,7 @@ $MEMORY_SECTION_WITHOUT_SNAPSHOT
     /** 系统与工作流模板（在 SKILL 管理中展示，不可选为活跃角色） */
     val systemTemplates: List<Skill> = listOf(
         SYS_AGENT_MODE, SYS_RULES, SYS_CAPABILITY_CATALOG,
-        SYS_WF_CREATE, SYS_WF_MODIFY, SYS_WF_MODULE, SYS_MEMORY
+        SYS_WF_CREATE, SYS_WF_MODIFY, SYS_WF_MODULE, SYS_WF_SSH, SYS_MEMORY
     )
 
     // ═══════════════════════════════════════
@@ -551,7 +630,7 @@ $MEMORY_SECTION_WITHOUT_SNAPSHOT
         isBuiltIn = true,
         bridgeGroups = setOf(BridgeGroup.STORAGE, BridgeGroup.UI_FEEDBACK, BridgeGroup.SENSOR, BridgeGroup.NETWORK),
         cdnGroups = setOf(CdnGroup.FRAMEWORK, CdnGroup.CHART, CdnGroup.THREE_D, CdnGroup.UTILS),
-        extraToolGroups = setOf(ToolGroup.DEVICE, ToolGroup.NETWORK, ToolGroup.MODULE)
+        extraToolGroups = setOf(ToolGroup.DEVICE, ToolGroup.NETWORK, ToolGroup.MODULE, ToolGroup.SSH)
     )
 
     val all: List<Skill> = listOf(DEFAULT)

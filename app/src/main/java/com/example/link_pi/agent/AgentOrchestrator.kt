@@ -888,18 +888,33 @@ class AgentOrchestrator(
         onStepSync: ((AgentStep) -> Unit)?
     ): ChatResponse {
         val thinkingLabel = "💡 $label 思考中..."
-        return aiService.chatStream(
-            messages = messages,
-            maxTokens = maxTokens,
-            enableThinking = enableThinking,
-            onThinkingDelta = { accumulated ->
-                // Called from IO thread — use sync callback for real-time UI update
-                onStepSync?.invoke(AgentStep(StepType.THINKING, thinkingLabel, accumulated))
-            },
-            onContentDelta = { accumulated ->
-                onStepSync?.invoke(AgentStep(StepType.THINKING, "$label...", accumulated.takeLast(200)))
+        val maxStreamRetries = 2
+        var lastException: Exception? = null
+        for (attempt in 0..maxStreamRetries) {
+            try {
+                return aiService.chatStream(
+                    messages = messages,
+                    maxTokens = maxTokens,
+                    enableThinking = enableThinking,
+                    onThinkingDelta = { accumulated ->
+                        onStepSync?.invoke(AgentStep(StepType.THINKING, thinkingLabel, accumulated))
+                    },
+                    onContentDelta = { accumulated ->
+                        onStepSync?.invoke(AgentStep(StepType.THINKING, "$label...", accumulated.takeLast(200)))
+                    }
+                )
+            } catch (e: java.io.IOException) {
+                lastException = e
+                if (attempt < maxStreamRetries) {
+                    val delayMs = (attempt + 1) * 3000L
+                    onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络中断，${delayMs / 1000}s后重试...", ""))
+                    kotlinx.coroutines.delay(delayMs)
+                    continue
+                }
+                throw e
             }
-        )
+        }
+        throw lastException ?: java.io.IOException("Unexpected stream retry exhaustion")
     }
 
 }

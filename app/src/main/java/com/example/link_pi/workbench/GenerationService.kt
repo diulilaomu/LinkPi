@@ -8,16 +8,18 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import com.example.link_pi.MainActivity
 import com.example.link_pi.R
 
 /**
  * Foreground service that keeps the process alive while workbench tasks
- * are generating in the background. Does NOT run its own coroutines —
- * it simply holds a foreground notification so the OS won't kill the app.
+ * are generating in the background. Holds a WakeLock + WifiLock to prevent
+ * CPU sleep and WiFi disconnection which cause "Software caused connection abort".
  *
  * Start/stop is managed by [WorkbenchViewModel] based on running task count.
  */
@@ -37,6 +39,9 @@ class GenerationService : Service() {
         }
     }
 
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -46,13 +51,37 @@ class GenerationService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        acquireLocks()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return START_STICKY
     }
 
+    override fun onDestroy() {
+        releaseLocks()
+        super.onDestroy()
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun acquireLocks() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LinkPi::Generation").apply {
+            acquire(60 * 60 * 1000L) // 1 hour max to prevent leak
+        }
+        val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LinkPi::Generation").apply {
+            acquire()
+        }
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
+    }
 
     private fun createNotificationChannel() {
         val channel = NotificationChannel(

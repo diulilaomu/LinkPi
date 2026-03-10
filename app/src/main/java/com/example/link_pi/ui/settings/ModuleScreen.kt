@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -136,12 +137,12 @@ fun ModuleScreen() {
                 items(modules, key = { it.id }) { module ->
                     ModuleCard(
                         module = module,
-                        onEdit = { editTarget = module },
-                        onDelete = { deleteTarget = module },
-                        onExport = {
+                        onEdit = if (module.isBuiltIn) null else {{ editTarget = module }},
+                        onDelete = if (module.isBuiltIn) null else {{ deleteTarget = module }},
+                        onExport = if (module.isBuiltIn) null else {{
                             exportTarget = module
                             exportLauncher.launch("${module.name}.json")
-                        }
+                        }}
                     )
                 }
             }
@@ -252,12 +253,14 @@ private fun EditModuleDialog(
 @Composable
 private fun ModuleCard(
     module: ModuleStorage.Module,
-    onEdit: () -> Unit,
-    onDelete: () -> Unit,
-    onExport: () -> Unit
+    onEdit: (() -> Unit)?,
+    onDelete: (() -> Unit)?,
+    onExport: (() -> Unit)?
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onEdit),
+        modifier = Modifier.fillMaxWidth().let { m ->
+            if (onEdit != null) m.clickable(onClick = onEdit) else m
+        },
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
@@ -305,29 +308,44 @@ private fun ModuleCard(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+                    if (module.isBuiltIn) {
+                        Spacer(modifier = Modifier.width(4.dp))
                         Icon(
-                            Icons.Outlined.Edit,
-                            contentDescription = "编辑",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                            Icons.Outlined.Lock,
+                            contentDescription = "内置",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                     }
-                    IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
-                        Icon(
-                            Icons.Outlined.Share,
-                            contentDescription = "导出",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
+                    if (onEdit != null) {
+                        IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Outlined.Edit,
+                                contentDescription = "编辑",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                            )
+                        }
                     }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                        Icon(
-                            Icons.Outlined.Delete,
-                            contentDescription = "删除",
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
-                        )
+                    if (onExport != null) {
+                        IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Outlined.Share,
+                                contentDescription = "导出",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                    if (onDelete != null) {
+                        IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = "删除",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                            )
+                        }
                     }
                 }
             }

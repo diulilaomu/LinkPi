@@ -63,6 +63,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.java.websocket)
     implementation(libs.androidx.security.crypto)
+    implementation(libs.jsch)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     testImplementation(libs.junit)
