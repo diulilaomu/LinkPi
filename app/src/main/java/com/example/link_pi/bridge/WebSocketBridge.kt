@@ -12,6 +12,7 @@ import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Manages a lightweight WebSocket server for LAN real-time communication.
@@ -24,7 +25,7 @@ class WebSocketBridge(
     private val mainHandler = Handler(Looper.getMainLooper())
     private var server: WsServer? = null
     private val clients = ConcurrentHashMap<String, WebSocket>()
-    private var clientIdCounter = 0
+    private val clientIdCounter = AtomicInteger(0)
 
     val isRunning: Boolean get() = server != null
 
@@ -56,7 +57,7 @@ class WebSocketBridge(
         } catch (_: Exception) {}
         server = null
         clients.clear()
-        clientIdCounter = 0
+        clientIdCounter.set(0)
     }
 
     fun send(clientId: String, message: String): Boolean {
@@ -85,7 +86,7 @@ class WebSocketBridge(
 
     private inner class WsServer(port: Int) : WebSocketServer(InetSocketAddress(port)) {
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake?) {
-            val id = "c${++clientIdCounter}"
+            val id = "c${clientIdCounter.incrementAndGet()}"
             clients[id] = conn
             conn.setAttachment(id)
             val addr = conn.remoteSocketAddress?.address?.hostAddress ?: "unknown"

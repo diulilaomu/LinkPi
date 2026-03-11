@@ -70,11 +70,13 @@ object FileBlockParser {
      * Sanitize file path — prevent directory traversal, normalize separators.
      */
     private fun sanitizePath(raw: String): String {
-        return raw
+        val normalized = raw
             .replace("\\", "/")
-            .replace("..", "")        // strip traversal
-            .removePrefix("/")        // no absolute paths
+            .removePrefix("/")
             .trim()
-            .ifBlank { "file.html" }
+        // Reject any path segment that is ".." (directory traversal)
+        val segments = normalized.split("/").filter { it.isNotEmpty() }
+        val safe = segments.filter { it != ".." && it != "." }.joinToString("/")
+        return safe.ifBlank { "file.html" }
     }
 }

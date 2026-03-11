@@ -103,6 +103,8 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.link_pi.agent.AgentStep
 import com.example.link_pi.agent.StepType
 import com.example.link_pi.network.ModelConfig
+import com.example.link_pi.ui.common.RichInputBar
+import com.example.link_pi.ui.common.RichInputBarStyle
 import com.example.link_pi.workbench.TaskStatus
 import com.example.link_pi.workbench.WorkbenchTask
 import kotlinx.coroutines.Dispatchers
@@ -537,230 +539,34 @@ private fun WorkspaceTabContent(
             }
 
             // ── Input bar ──
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                shadowElevation = 6.dp
-            ) {
-                Column {
-                // Model selector list (expands inside the card)
-                AnimatedVisibility(
-                    visible = showModelMenu,
-                    enter = expandVertically(),
-                    exit = shrinkVertically()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 8.dp, end = 8.dp, top = 8.dp)
-                    ) {
-                        models.forEach { model ->
-                            val isActive = model.id == activeModelId
-                            Surface(
-                                onClick = {
-                                    viewModel.switchModel(model.id)
-                                    showModelMenu = false
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (isActive)
-                                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                                else
-                                    Color.Transparent
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = model.name.ifBlank { model.model },
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = if (isActive)
-                                            MaterialTheme.colorScheme.primary
-                                        else
-                                            MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    if (isActive) {
-                                        Icon(
-                                            Icons.Filled.Check,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 4.dp),
-                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-                        )
-                    }
-                }
-
-                // Text input
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    enabled = !isBusy,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp),
-                    placeholder = {
-                        Text(
-                            if (isBusy) "正在生成中…" else "描述你想要的修改...",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                    },
-                    maxLines = 4,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        unfocusedBorderColor = Color.Transparent,
-                        focusedBorderColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        focusedContainerColor = Color.Transparent
-                    ),
-                    textStyle = MaterialTheme.typography.bodyMedium
-                )
-
-                // Bottom toolbar
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Left tools
-                    Row(
-                        modifier = Modifier.weight(1f),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Model selector toggle
-                        Surface(
-                            onClick = { showModelMenu = !showModelMenu },
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (showModelMenu)
-                                MaterialTheme.colorScheme.primaryContainer
-                            else
-                                Color.Transparent
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = activeModel?.name?.ifBlank { activeModel?.model ?: "模型" } ?: "模型",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (showModelMenu)
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.widthIn(max = 80.dp)
-                                )
-                                val arrowRotation by animateFloatAsState(
-                                    targetValue = if (showModelMenu) 180f else 0f,
-                                    label = "arrow"
-                                )
-                                Icon(
-                                    Icons.Filled.KeyboardArrowDown,
-                                    contentDescription = null,
-                                    modifier = Modifier
-                                        .size(14.dp)
-                                        .rotate(arrowRotation),
-                                    tint = if (showModelMenu)
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        // Deep thinking toggle
-                        Surface(
-                            onClick = { viewModel.toggleDeepThinking() },
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (deepThinking)
-                                MaterialTheme.colorScheme.primaryContainer
-                            else
-                                Color.Transparent
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    Icons.Outlined.Lightbulb,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp),
-                                    tint = if (deepThinking)
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                )
-                                Text(
-                                    text = "深度思考",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (deepThinking)
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                )
-                            }
-                        }
-
-                        // Attachment button
-                        Surface(
-                            onClick = onPickFile,
-                            shape = RoundedCornerShape(16.dp),
-                            color = Color.Transparent
-                        ) {
-                            Icon(
-                                Icons.Outlined.AttachFile,
-                                contentDescription = "附件",
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp).size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                        }
-                    }
-
-                    // Send button
-                    val canSend = inputText.isNotBlank() && !isBusy
-                    Surface(
-                        onClick = {
-                            if (canSend) {
-                                val prompt = inputText.trim()
-                                inputText = ""
-                                justSent = true
-                                viewModel.modifyApp(task.id, prompt)
-                            }
-                        },
-                        enabled = canSend,
-                        shape = RoundedCornerShape(24.dp),
-                        color = if (canSend)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f)
-                    ) {
-                        Text(
-                            text = "发送",
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (canSend)
-                                MaterialTheme.colorScheme.onPrimary
-                            else
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        )
-                    }
-                }
-            }
-        }
+            RichInputBar(
+                text = inputText,
+                onTextChange = { inputText = it },
+                onSend = {
+                    val prompt = inputText.trim()
+                    inputText = ""
+                    justSent = true
+                    viewModel.modifyApp(task.id, prompt)
+                },
+                enabled = !isBusy,
+                placeholder = "描述你想要的修改...",
+                disabledPlaceholder = "正在生成中…",
+                models = models,
+                activeModelId = activeModelId.orEmpty(),
+                onSwitchModel = {
+                    viewModel.switchModel(it)
+                    showModelMenu = false
+                },
+                showModelMenu = showModelMenu,
+                onToggleModelMenu = { showModelMenu = !showModelMenu },
+                deepThinking = deepThinking,
+                onToggleThinking = { viewModel.toggleDeepThinking() },
+                onPickFile = onPickFile,
+                showAttachButton = true,
+                style = RichInputBarStyle.Material,
+                modifier = Modifier,
+                shadowElevation = 6.dp,
+            )
         }   // end Column (bottom panel)
     }       // end Box
 }

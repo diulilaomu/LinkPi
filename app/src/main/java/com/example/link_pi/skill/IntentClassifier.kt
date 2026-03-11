@@ -11,26 +11,6 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 object IntentClassifier {
 
-    // Creation verb keywords — must combine with a noun keyword to trigger CREATE_APP
-    private val CREATE_VERB_KEYWORDS = setOf(
-        "做", "写", "创建", "生成", "开发", "制作", "搭建", "构建", "实现",
-        "帮我做", "帮我写", "帮我开发", "帮我创建",
-        "做一个", "写一个", "来一个", "弄一个", "搞一个",
-        "create", "build", "make", "generate"
-    )
-    private val CREATE_NOUN_KEYWORDS = setOf(
-        "工具", "页面", "网页", "应用", "app", "html", "游戏"
-    )
-    // Auto-generated from CREATE_VERB_KEYWORDS to stay in sync
-    private val CREATE_VERB_PATTERN = Regex(
-        CREATE_VERB_KEYWORDS.sortedByDescending { it.length }
-            .joinToString("|") { Regex.escape(it) }
-    )
-    private val MODIFY_KEYWORDS = setOf(
-        "修改", "修复", "改一下", "更新", "改进", "优化", "调整", "换成",
-        "加一个", "加上", "删掉", "去掉", "移除",
-        "fix", "update", "change", "modify", "improve"
-    )
     private val MODULE_KEYWORDS = setOf(
         "模块", "module", "端点", "endpoint", "api"
     )

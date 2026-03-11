@@ -908,7 +908,7 @@ class AgentOrchestrator(
         val thinkingLabel = "💡 $label 思考中..."
         val maxStreamRetries = 6
         var lastException: Exception? = null
-        for (attempt in 0..maxStreamRetries) {
+        for (attempt in 0 until maxStreamRetries) {
             try {
                 return aiService.chatStream(
                     messages = messages,
@@ -923,8 +923,8 @@ class AgentOrchestrator(
                 )
             } catch (e: java.io.IOException) {
                 lastException = e
-                if (attempt < maxStreamRetries) {
-                    onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络中断，等待网络恢复(${attempt + 1}/$maxStreamRetries)...", ""))
+                if (attempt < maxStreamRetries - 1) {
+                    onStepSync?.invoke(AgentStep(StepType.THINKING, "$label 网络中断，等待网络恢复(${attempt + 1}/${maxStreamRetries - 1})...", ""))
                     // Wait for network to come back (up to 60s), then add a small extra delay
                     val recovered = com.example.link_pi.network.AiService.waitForNetwork(60_000)
                     if (recovered) {

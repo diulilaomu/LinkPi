@@ -176,6 +176,12 @@ class GenerationService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Task $taskId failed", e)
+                val failed = taskStorage.loadById(taskId)
+                if (failed != null && failed.status != TaskStatus.COMPLETED && failed.status != TaskStatus.FAILED) {
+                    val updated = failed.copy(status = TaskStatus.FAILED, error = e.message, updatedAt = System.currentTimeMillis())
+                    taskStorage.save(updated)
+                    broadcastUpdate(updated)
+                }
             } finally {
                 markRunning(taskId, false)
                 taskJobs.remove(taskId)
@@ -210,6 +216,12 @@ class GenerationService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Task $taskId modify failed", e)
+                val failed = taskStorage.loadById(taskId)
+                if (failed != null && failed.status != TaskStatus.COMPLETED && failed.status != TaskStatus.FAILED) {
+                    val updated = failed.copy(status = TaskStatus.FAILED, error = e.message, updatedAt = System.currentTimeMillis())
+                    taskStorage.save(updated)
+                    broadcastUpdate(updated)
+                }
             } finally {
                 markRunning(taskId, false)
                 taskJobs.remove(taskId)
@@ -224,6 +236,13 @@ class GenerationService : Service() {
     private fun doCancel(taskId: String) {
         taskJobs.remove(taskId)?.cancel()
         markRunning(taskId, false)
+        // Update task status so UI reflects the cancellation
+        val task = taskStorage.loadById(taskId)
+        if (task != null && task.status != TaskStatus.COMPLETED && task.status != TaskStatus.FAILED) {
+            val cancelled = task.copy(status = TaskStatus.FAILED, error = "已取消", updatedAt = System.currentTimeMillis())
+            taskStorage.save(cancelled)
+            broadcastUpdate(cancelled)
+        }
         stopIfIdle()
     }
 
@@ -250,7 +269,7 @@ class GenerationService : Service() {
     private fun acquireLocks() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LinkPi::Generation").apply {
-            acquire()  // No timeout — released in onDestroy when all tasks finish
+            acquire(60 * 60 * 1000L)  // 1 hour timeout as safety net; released in onDestroy
         }
         @Suppress("DEPRECATION")
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager

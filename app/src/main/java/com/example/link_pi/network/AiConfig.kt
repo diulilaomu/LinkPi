@@ -2,8 +2,7 @@ package com.example.link_pi.network
 
 import android.content.Context
 import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
+import com.example.link_pi.util.createEncryptedPrefs
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,23 +19,8 @@ class AiConfig(context: Context) {
     private val prefs: SharedPreferences
 
     init {
-        var plain = false
-        prefs = try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-            EncryptedSharedPreferences.create(
-                context,
-                "ai_config_encrypted",
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
-        } catch (e: Exception) {
-            android.util.Log.e("AiConfig", "EncryptedSharedPreferences failed, falling back to plain storage", e)
-            plain = true
-            context.getSharedPreferences("ai_config", Context.MODE_PRIVATE)
-        }
+        val (p, plain) = createEncryptedPrefs(context, "ai_config")
+        prefs = p
         isUsingPlainStorage = plain
         migrateFromPlainPrefs(context)
         migrateFromLegacySingle()
@@ -55,7 +39,7 @@ class AiConfig(context: Context) {
 
     fun getModels(): List<ModelConfig> {
         if (_models == null) _models = loadModels().toMutableList()
-        return _models!!
+        return _models!!.toList()
     }
 
     /** Clear in-memory cache and reload from SharedPreferences. */
@@ -123,18 +107,21 @@ class AiConfig(context: Context) {
 
     /** One-time: plaintext → encrypted */
     private fun migrateFromPlainPrefs(context: Context) {
+        if (isUsingPlainStorage) return  // Both are the same prefs; no migration needed
         val oldPrefs = context.getSharedPreferences("ai_config", Context.MODE_PRIVATE)
         val oldKey = oldPrefs.getString("api_key", null)
         if (oldKey != null && oldKey.isNotBlank()) {
             val ep = oldPrefs.getString("api_endpoint", DEFAULT_ENDPOINT) ?: DEFAULT_ENDPOINT
             val mn = oldPrefs.getString("model_name", DEFAULT_MODEL) ?: DEFAULT_MODEL
-            // Write into encrypted prefs so legacy migration below picks it up
-            prefs.edit()
+            // Write into encrypted prefs first, then clear old prefs
+            val success = prefs.edit()
                 .putString("api_endpoint", ep)
                 .putString("api_key", oldKey)
                 .putString("model_name", mn)
-                .apply()
-            oldPrefs.edit().clear().apply()
+                .commit()
+            if (success) {
+                oldPrefs.edit().clear().apply()
+            }
         }
     }
 

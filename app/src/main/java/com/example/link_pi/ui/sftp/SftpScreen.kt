@@ -2,6 +2,7 @@ package com.example.link_pi.ui.sftp
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import com.example.link_pi.ui.theme.*
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -85,20 +86,6 @@ import java.io.File
 
 // ═══════════════════════════════════════
 //  Theme — reuse SSH terminal palette
-// ═══════════════════════════════════════
-
-private val TermBg = Color(0xFF0D1117)
-private val TermSurface = Color(0xFF161B22)
-private val TermCard = Color(0xFF1C2128)
-private val TermBorder = Color(0xFF30363D)
-private val TermGreen = Color(0xFF3FB950)
-private val TermYellow = Color(0xFFD29922)
-private val TermRed = Color(0xFFF85149)
-private val TermCyan = Color(0xFF58A6FF)
-private val TermText = Color(0xFFE6EDF3)
-private val TermDim = Color(0xFF8B949E)
-private val MonoFont = FontFamily.Monospace
-
 // ═══════════════════════════════════════
 //  Main Screen
 // ═══════════════════════════════════════
@@ -421,23 +408,12 @@ private fun RemoteFileRow(
     var showDeleteDialog by remember { mutableStateOf(false) }
 
     if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            containerColor = TermCard,
-            titleContentColor = TermText,
-            textContentColor = TermDim,
-            title = { Text("确认删除", style = TextStyle(fontFamily = MonoFont, fontSize = 14.sp, fontWeight = FontWeight.Bold)) },
-            text = { Text("确定要删除 ${file.name} 吗？${if (file.isDir) "（将递归删除目录内容）" else ""}", style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp)) },
-            confirmButton = {
-                TextButton(onClick = { showDeleteDialog = false; onDelete() }) {
-                    Text("删除", color = TermRed, style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) {
-                    Text("取消", color = TermDim, style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp))
-                }
-            }
+        TermConfirmDialog(
+            title = "确认删除",
+            message = "确定要删除 ${file.name} 吗？${if (file.isDir) "（将递归删除目录内容）" else ""}",
+            onConfirm = { showDeleteDialog = false; onDelete() },
+            onDismiss = { showDeleteDialog = false },
+            confirmText = "删除"
         )
     }
 

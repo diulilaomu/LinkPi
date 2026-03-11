@@ -1,5 +1,11 @@
 package com.example.link_pi.ui.ssh
 
+import android.content.res.Configuration
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.example.link_pi.ui.theme.*
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
@@ -8,8 +14,10 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,6 +35,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -43,6 +52,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.OpenInFull
@@ -63,93 +73,81 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import com.example.link_pi.agent.SshOrchestrator.CommandStatus
 import com.example.link_pi.ui.common.MarkdownText
+import com.example.link_pi.ui.common.RichInputBar
+import com.example.link_pi.ui.common.RichInputBarStyle
+import com.example.link_pi.network.ModelConfig
 import com.example.link_pi.ui.sftp.SftpScreen
 import com.example.link_pi.ui.sftp.SftpViewModel
 import com.example.link_pi.ui.sftp.FileEditorScreen
 
-// ═══════════════════════════════════════
-//  DOS-style Dark Color Palette
-// ═══════════════════════════════════════
-
-private val TermBg = Color(0xFF0D1117)
-private val TermSurface = Color(0xFF161B22)
-private val TermCard = Color(0xFF1C2128)
-private val TermBorder = Color(0xFF30363D)
-private val TermGreen = Color(0xFF3FB950)
-private val TermYellow = Color(0xFFD29922)
-private val TermRed = Color(0xFFF85149)
-private val TermCyan = Color(0xFF58A6FF)
-private val TermText = Color(0xFFE6EDF3)
-private val TermDim = Color(0xFF8B949E)
-private val TermInputBg = Color(0xFF0D1117)
-
-private val MonoFont = FontFamily.Monospace
-
 @Composable
 fun SshScreen(
     viewModel: SshViewModel,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onDisconnect: () -> Unit
 ) {
     var page by remember { mutableStateOf("ssh") }
     val sftpViewModel: SftpViewModel = viewModel()
     val sessionId by viewModel.sessionId.collectAsState()
     val isManualMode by viewModel.isManualMode.collectAsState()
-    var showModeSwitchDialog by remember { mutableStateOf(false) }
 
-    // 右滑确认进入手动模式对话框
-    if (showModeSwitchDialog) {
-        AlertDialog(
-            onDismissRequest = { showModeSwitchDialog = false },
-            containerColor = TermSurface,
-            title = {
-                Text(
-                    "切换到手动模式",
-                    style = TextStyle(fontFamily = MonoFont, fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold, color = TermText)
-                )
-            },
-            text = {
-                Text(
-                    "手动模式下可直接输入 Shell 命令执行，无 AI 辅助。\n左滑可切回 AI 模式。",
-                    style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp, color = TermDim)
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    showModeSwitchDialog = false
-                    viewModel.setManualMode(true)
-                }) { Text("确定", color = TermGreen) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showModeSwitchDialog = false }) {
-                    Text("取消", color = TermDim)
-                }
-            }
-        )
+    // 系统返回 — 手动模式下需连按两次才能退出
+    var lastBackTime by remember { mutableLongStateOf(0L) }
+    val context = LocalContext.current
+    BackHandler(enabled = page == "ssh") {
+        val now = System.currentTimeMillis()
+        if (now - lastBackTime < 2000) {
+            onBack()
+        } else {
+            lastBackTime = now
+            Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
+        }
     }
+
+    val isSessionDropped by viewModel.isSessionDropped.collectAsState()
+    val isReconnecting by viewModel.isReconnecting.collectAsState()
 
     when (page) {
         "ssh" -> {
@@ -157,21 +155,27 @@ fun SshScreen(
                 ManualTerminalContent(
                     viewModel = viewModel,
                     onBack = onBack,
+                    onDisconnect = onDisconnect,
+                    isSessionDropped = isSessionDropped,
+                    isReconnecting = isReconnecting,
+                    onReconnect = { viewModel.reconnect() },
                     onOpenSftp = {
                         val sid = sessionId
                         if (sid != null) page = "sftp"
-                    },
-                    onSwitchToAi = { viewModel.setManualMode(false) }
+                    }
                 )
             } else {
                 SshTerminalContent(
                     viewModel = viewModel,
                     onBack = onBack,
+                    onDisconnect = onDisconnect,
+                    isSessionDropped = isSessionDropped,
+                    isReconnecting = isReconnecting,
+                    onReconnect = { viewModel.reconnect() },
                     onOpenSftp = {
                         val sid = sessionId
                         if (sid != null) page = "sftp"
-                    },
-                    onRequestManualMode = { showModeSwitchDialog = true }
+                    }
                 )
             }
         }
@@ -199,16 +203,34 @@ fun SshScreen(
 private fun SshTerminalContent(
     viewModel: SshViewModel,
     onBack: () -> Unit,
-    onOpenSftp: () -> Unit,
-    onRequestManualMode: () -> Unit
+    onDisconnect: () -> Unit,
+    isSessionDropped: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
+    onOpenSftp: () -> Unit
 ) {
     val messages by viewModel.messages.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
     val serverInfo by viewModel.serverInfo.collectAsState()
     val pendingCommands by viewModel.pendingCommands.collectAsState()
     val deepThinking by viewModel.deepThinking.collectAsState()
+    val isManualMode by viewModel.isManualMode.collectAsState()
+    val models by viewModel.models.collectAsState()
+    val activeModelId by viewModel.activeModelId.collectAsState()
+    val pendingAttachments by viewModel.pendingAttachments.collectAsState()
     val listState = rememberLazyListState()
     var inputText by remember { mutableStateOf("") }
+    var showModelMenu by remember { mutableStateOf(false) }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        uri?.let { viewModel.addAttachment(it) }
+    }
+
+    val context = LocalContext.current
+    // Double horizontal-swipe to go back
+    var lastSwipeTime by remember { mutableLongStateOf(0L) }
 
     val density = LocalDensity.current
     val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
@@ -236,20 +258,23 @@ private fun SshTerminalContent(
             .statusBarsPadding()
             .padding(bottom = bottomPadding)
             .pointerInput(Unit) {
-                var totalDrag = 0f
-                detectHorizontalDragGestures(
-                    onDragStart = { totalDrag = 0f },
-                    onDragEnd = {
-                        if (totalDrag > 200) onRequestManualMode()
-                        totalDrag = 0f
-                    },
-                    onDragCancel = { totalDrag = 0f },
-                    onHorizontalDrag = { _, amount -> totalDrag += amount }
-                )
+                detectHorizontalDragGestures { _, dragAmount ->
+                    if (kotlin.math.abs(dragAmount) > 30f) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastSwipeTime < 2000) {
+                            onBack()
+                        } else {
+                            lastSwipeTime = now
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                }
             }
     ) {
         // ── Top Bar ──
-        SshTopBar(serverInfo, deepThinking, onBack, viewModel::toggleDeepThinking, viewModel::disconnect, onOpenSftp)
+        SshTopBar(serverInfo, isManualMode, onBack, { viewModel.setManualMode(!isManualMode) }, onDisconnect, isSessionDropped, isReconnecting, onReconnect, onOpenSftp)
 
         // ── Message List ──
         LazyColumn(
@@ -309,17 +334,91 @@ private fun SshTerminalContent(
         }
 
         // ── Input Area ──
-        SshInputBar(
+        RichInputBar(
             text = inputText,
             onTextChange = { inputText = it },
             onSend = {
-                if (inputText.isNotBlank() && !isLoading) {
-                    viewModel.sendMessage(inputText)
-                    inputText = ""
-                }
+                viewModel.sendMessage(inputText)
+                inputText = ""
             },
-            enabled = !isLoading
+            enabled = !isLoading,
+            placeholder = "输入你的需求...",
+            disabledPlaceholder = "AI 处理中...",
+            maxLines = 3,
+            models = models,
+            activeModelId = activeModelId,
+            onSwitchModel = viewModel::switchModel,
+            showModelMenu = showModelMenu,
+            onToggleModelMenu = { showModelMenu = !showModelMenu },
+            deepThinking = deepThinking,
+            onToggleThinking = viewModel::toggleDeepThinking,
+            pendingAttachments = pendingAttachments,
+            onRemoveAttachment = viewModel::removeAttachment,
+            onPickFile = {
+                filePickerLauncher.launch(arrayOf(
+                    "text/plain", "text/markdown", "text/x-markdown",
+                    "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp"
+                ))
+            },
+            style = RichInputBarStyle.Terminal,
+            leadingContent = {
+                Text(
+                    ">_",
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TermGreen),
+                    modifier = Modifier.padding(start = 8.dp)
+                )
+            }
         )
+    }
+}
+
+// ═══════════════════════════════════════
+//  Connection Status Button (shared)
+// ═══════════════════════════════════════
+
+@Composable
+private fun ConnectionStatusButton(
+    isSessionDropped: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit
+) {
+    if (isSessionDropped) {
+        Surface(
+            onClick = onReconnect,
+            shape = RoundedCornerShape(16.dp),
+            color = TermYellow.copy(alpha = 0.15f)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (isReconnecting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = TermYellow
+                    )
+                }
+                Text(
+                    if (isReconnecting) "重连中" else "重连",
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermYellow)
+                )
+            }
+        }
+    } else {
+        Surface(
+            onClick = onDisconnect,
+            shape = RoundedCornerShape(16.dp),
+            color = TermRed.copy(alpha = 0.1f)
+        ) {
+            Text(
+                "断开",
+                style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermRed),
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            )
+        }
     }
 }
 
@@ -330,22 +429,22 @@ private fun SshTerminalContent(
 @Composable
 private fun SshTopBar(
     serverInfo: ServerInfo?,
-    deepThinking: Boolean,
+    isManualMode: Boolean,
     onBack: () -> Unit,
-    onToggleThinking: () -> Unit,
+    onToggleMode: () -> Unit,
     onDisconnect: () -> Unit,
+    isSessionDropped: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
     onOpenSftp: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(TermSurface)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = TermText)
-        }
         Icon(
             Icons.Outlined.Terminal,
             contentDescription = null,
@@ -383,43 +482,21 @@ private fun SshTopBar(
             )
         }
 
-        // Deep Thinking Toggle
+        // AI/Manual Mode Toggle
         Surface(
-            onClick = onToggleThinking,
+            onClick = onToggleMode,
             shape = RoundedCornerShape(16.dp),
-            color = if (deepThinking) TermCyan.copy(alpha = 0.15f) else Color.Transparent
-        ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Icon(
-                    Icons.Outlined.Lightbulb,
-                    contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = if (deepThinking) TermCyan else TermDim
-                )
-                Text(
-                    "深度思考",
-                    style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp,
-                        color = if (deepThinking) TermCyan else TermDim)
-                )
-            }
-        }
-
-        // Disconnect button
-        Surface(
-            onClick = onDisconnect,
-            shape = RoundedCornerShape(16.dp),
-            color = TermRed.copy(alpha = 0.1f)
+            color = if (isManualMode) TermYellow.copy(alpha = 0.15f) else TermCyan.copy(alpha = 0.15f)
         ) {
             Text(
-                "断开",
-                style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermRed),
+                if (isManualMode) "辅助" else "手动",
+                style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp,
+                    color = if (isManualMode) TermYellow else TermCyan),
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
             )
         }
+
+        ConnectionStatusButton(isSessionDropped, isReconnecting, onReconnect, onDisconnect)
     }
 }
 
@@ -586,6 +663,7 @@ private fun PendingCommandsPanel(
 
     Surface(
         color = TermSurface,
+        shape = RoundedCornerShape(20.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, TermYellow.copy(alpha = 0.4f)),
         modifier = Modifier
             .fillMaxWidth()
@@ -1076,108 +1154,165 @@ private fun SshLoadingIndicator() {
 }
 
 // ═══════════════════════════════════════
-//  Input Bar (DOS-style)
-// ═══════════════════════════════════════
-
-@Composable
-private fun SshInputBar(
-    text: String,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    enabled: Boolean
-) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = TermSurface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, TermBorder)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        ) {
-            Text(
-                ">_",
-                style = TextStyle(fontFamily = MonoFont, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TermGreen),
-                modifier = Modifier.padding(start = 8.dp)
-            )
-            OutlinedTextField(
-                value = text,
-                onValueChange = onTextChange,
-                enabled = enabled,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 4.dp),
-                placeholder = {
-                    Text(
-                        if (enabled) "输入你的需求..." else "AI 处理中...",
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermDim)
-                    )
-                },
-                maxLines = 3,
-                colors = OutlinedTextFieldDefaults.colors(
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedBorderColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    focusedContainerColor = Color.Transparent,
-                    cursorColor = TermGreen,
-                    disabledBorderColor = Color.Transparent,
-                    disabledContainerColor = Color.Transparent,
-                    disabledTextColor = TermDim
-                ),
-                textStyle = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermText)
-            )
-
-            val canSend = text.isNotBlank() && enabled
-            IconButton(
-                onClick = onSend,
-                enabled = canSend
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "发送",
-                    tint = if (canSend) TermGreen else TermDim,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════
-//  Manual Terminal Content (手动模式)
+//  Manual Terminal Content (手动模式 · PuTTY Style)
 // ═══════════════════════════════════════
 
 @Composable
 private fun ManualTerminalContent(
     viewModel: SshViewModel,
     onBack: () -> Unit,
-    onOpenSftp: () -> Unit,
-    onSwitchToAi: () -> Unit
+    onDisconnect: () -> Unit,
+    isSessionDropped: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
+    onOpenSftp: () -> Unit
 ) {
-    val messages by viewModel.messages.collectAsState()
+    val terminalOutput by viewModel.terminalOutput.collectAsState()
     val serverInfo by viewModel.serverInfo.collectAsState()
-    val listState = rememberLazyListState()
-    var inputValue by remember { mutableStateOf(TextFieldValue("")) }
-    var shortcutBarExpanded by remember { mutableStateOf(true) }
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val scope = rememberCoroutineScope()
+    var activeModifiers by remember { mutableStateOf(setOf<String>()) }
+    val context = LocalContext.current
+
+    // Double horizontal-swipe to go back
+    var lastSwipeTime by remember { mutableLongStateOf(0L) }
+
+    // Cursor blink: blink in alternate screen (vim/nano), steady in normal terminal
+    val isAltScreen by viewModel.isAlternateScreen.collectAsState()
+    var cursorVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(isAltScreen) {
+        if (isAltScreen) {
+            while (true) {
+                delay(530)
+                cursorVisible = !cursorVisible
+            }
+        } else {
+            cursorVisible = true  // Steady cursor in normal terminal
+        }
+    }
+    // Reset blink phase on new output
+    LaunchedEffect(terminalOutput) {
+        if (isAltScreen) cursorVisible = true
+    }
+    val displayOutput = remember(terminalOutput, cursorVisible) {
+        viewModel.renderOutput(cursorVisible)
+    }
+    // Status line (vim bottom bar) — rendered separately
+    val statusLine by viewModel.statusLine.collectAsState()
+    val displayStatus = remember(statusLine, cursorVisible) {
+        viewModel.renderStatusOutput(cursorVisible)
+    }
+    val scrollState = rememberScrollState()
+
+    // Padding chars — always kept in hidden field so backspace has something to delete
+    val pad = "\u200B\u200B\u200B\u200B" // 4 zero-width spaces
+    var hiddenInput by remember { mutableStateOf(TextFieldValue(pad, TextRange(pad.length))) }
 
     val density = LocalDensity.current
     val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
     val navBarBottomDp = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
     val bottomPadding = maxOf(imeBottomDp, navBarBottomDp)
 
-    // Auto-scroll
-    LaunchedEffect(messages.size) {
-        if (listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+    // Terminal font size and column measurement
+    val textMeasurer = rememberTextMeasurer()
+    val baseFontSizeSp = 8f
+    val termPaddingPx = with(density) { 6.dp.toPx() * 2 }
+    val charWidthPx = remember(density) {
+        val sample = 80
+        textMeasurer.measure(
+            "M".repeat(sample),
+            style = TextStyle(fontFamily = MonoFont, fontSize = baseFontSizeSp.sp),
+            maxLines = 1
+        ).size.width.toFloat() / sample
+    }
+    var containerWidthPx by remember { mutableIntStateOf(0) }
+    val termCols = remember(containerWidthPx, charWidthPx) {
+        if (containerWidthPx > 0 && charWidthPx > 0f) {
+            ((containerWidthPx - termPaddingPx) / charWidthPx).toInt().coerceIn(20, 300)
+        } else 80
+    }
+    val termRows = 40
+
+    // Dynamic font size: use smaller font in alt screen (TUI mode)
+    val effectiveFontSizeSp = if (isAltScreen) 7f else baseFontSizeSp
+
+    LaunchedEffect(termCols) {
+        viewModel.updateTerminalSize(termCols, termRows)
+    }
+
+    // When leaving alternate screen (vim/nano exit), scroll to bottom
+    LaunchedEffect(isAltScreen) {
+        if (!isAltScreen) {
+            scrollState.scrollTo(scrollState.maxValue)
         }
     }
 
+    // Auto-scroll to bottom when output changes — but only when:
+    // 1. Not in alternate screen (vim/nano manage their own viewport)
+    // 2. User was already near the bottom (don't yank away if scrolled up)
+    LaunchedEffect(terminalOutput) {
+        if (!isAltScreen) {
+            val nearBottom = scrollState.maxValue - scrollState.value < 200
+            if (nearBottom) {
+                scrollState.scrollTo(scrollState.maxValue)
+            }
+        }
+    }
     LaunchedEffect(imeBottomDp) {
-        if (imeBottomDp > navBarBottomDp && listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+        if (imeBottomDp > navBarBottomDp && !isAltScreen) {
+            scrollState.scrollTo(scrollState.maxValue)
+        }
+    }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    // Process modifier+key combo — send control chars directly to shell
+    fun processCombo(mods: Set<String>, key: String) {
+        val hasCtrl = "CTRL" in mods
+        when {
+            hasCtrl && key.length == 1 && key[0].isLetter() -> {
+                viewModel.sendControlChar(key.uppercase()[0])
+            }
+            hasCtrl && key == "↑" -> scope.launch { scrollState.scrollTo(0) }
+            hasCtrl && key == "↓" -> scope.launch { scrollState.scrollTo(scrollState.maxValue) }
+        }
+    }
+
+    // Handle direct key press — send escape sequences to shell
+    fun processDirectKey(key: String) {
+        when (key) {
+            "ESC"  -> {
+                viewModel.sendEscape()
+            }
+            "TAB"  -> viewModel.sendRawToShell("\t")
+            "/", "|", "-", ":" -> viewModel.sendRawToShell(key)
+            "HOME" -> viewModel.sendRawToShell("\u001b[H")
+            "END"  -> viewModel.sendRawToShell("\u001b[F")
+            "↑"    -> viewModel.sendRawToShell("\u001b[A")
+            "↓"    -> viewModel.sendRawToShell("\u001b[B")
+            "←"    -> viewModel.sendRawToShell("\u001b[D")
+            "→"    -> viewModel.sendRawToShell("\u001b[C")
+            "F1"   -> viewModel.sendRawToShell("\u001bOP")
+            "F2"   -> viewModel.sendRawToShell("\u001bOQ")
+            "F3"   -> viewModel.sendRawToShell("\u001bOR")
+            "F4"   -> viewModel.sendRawToShell("\u001bOS")
+            "F5"   -> viewModel.sendRawToShell("\u001b[15~")
+            "F6"   -> viewModel.sendRawToShell("\u001b[17~")
+            "F7"   -> viewModel.sendRawToShell("\u001b[18~")
+            "F8"   -> viewModel.sendRawToShell("\u001b[19~")
+            "F9"   -> viewModel.sendRawToShell("\u001b[20~")
+            "F10"  -> viewModel.sendRawToShell("\u001b[21~")
+            "F11"  -> viewModel.sendRawToShell("\u001b[23~")
+            "F12"  -> viewModel.sendRawToShell("\u001b[24~")
+            "PGUP" -> {
+                if (isAltScreen) viewModel.sendRawToShell("\u001b[5~")
+                else scope.launch { scrollState.animateScrollTo((scrollState.value - 500).coerceAtLeast(0)) }
+            }
+            "PGDN" -> {
+                if (isAltScreen) viewModel.sendRawToShell("\u001b[6~")
+                else scope.launch { scrollState.animateScrollTo((scrollState.value + 500).coerceAtMost(scrollState.maxValue)) }
+            }
         }
     }
 
@@ -1188,96 +1323,191 @@ private fun ManualTerminalContent(
             .statusBarsPadding()
             .padding(bottom = bottomPadding)
             .pointerInput(Unit) {
-                var totalDrag = 0f
-                detectHorizontalDragGestures(
-                    onDragStart = { totalDrag = 0f },
-                    onDragEnd = {
-                        if (totalDrag < -200) onSwitchToAi()
-                        totalDrag = 0f
-                    },
-                    onDragCancel = { totalDrag = 0f },
-                    onHorizontalDrag = { _, amount -> totalDrag += amount }
-                )
-            }
-    ) {
-        // ── Top Bar (no deep thinking) ──
-        ManualTopBar(serverInfo, onBack, viewModel::disconnect, onOpenSftp)
-
-        // ── Message List ──
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = PaddingValues(vertical = 8.dp)
-        ) {
-            serverInfo?.let { info ->
-                if (info.osType.isNotBlank()) {
-                    item(key = "server_info") {
-                        ServerInfoCard(info)
-                    }
-                }
-            }
-
-            items(messages, key = { it.id }) { msg ->
-                when (msg.role) {
-                    "user" -> UserBubble(msg.content)
-                    "assistant" -> AssistantBubble(msg.content, msg.thinkingContent)
-                    "system" -> SystemMessage(msg.content)
-                    "result" -> {
-                        ExecutionResultCard(msg.executedCommands)
-                        msg.executedCommands.forEach { cmd ->
-                            if (cmd.explanation.isNotBlank()) {
-                                Spacer(Modifier.height(6.dp))
-                                ExplanationCard(cmd)
+                detectHorizontalDragGestures { _, dragAmount ->
+                    if (kotlin.math.abs(dragAmount) > 30f) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastSwipeTime < 2000) {
+                            onBack()
+                        } else {
+                            lastSwipeTime = now
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
                 }
             }
-        }
-
-        // ── Manual Input Bar ──
-        ManualInputBar(
-            value = inputValue,
-            onValueChange = { inputValue = it },
-            onSend = {
-                if (inputValue.text.isNotBlank()) {
-                    viewModel.sendManualCommand(inputValue.text)
-                    inputValue = TextFieldValue("")
+    ) {
+        // ── Minimal Top Bar ──
+        ManualTopBar(
+            serverInfo = serverInfo,
+            isModelConfigured = viewModel.isModelConfigured,
+            onSwitchToAssist = {
+                if (viewModel.isModelConfigured) {
+                    viewModel.setManualMode(false)
+                } else {
+                    Toast.makeText(context, "模型未设置或网络异常", Toast.LENGTH_SHORT).show()
                 }
-            }
+            },
+            onDisconnect = onDisconnect,
+            isSessionDropped = isSessionDropped,
+            isReconnecting = isReconnecting,
+            onReconnect = onReconnect,
+            onOpenSftp = onOpenSftp
         )
 
-        // ── Shortcut Key Bar (collapsible, above keyboard) ──
-        ShortcutKeyBar(
-            expanded = shortcutBarExpanded,
-            onToggleExpand = { shortcutBarExpanded = !shortcutBarExpanded },
-            onInsertText = { text ->
-                val sel = inputValue.selection
-                val newText = inputValue.text.substring(0, sel.start) + text +
-                        inputValue.text.substring(sel.end)
-                inputValue = TextFieldValue(newText, TextRange(sel.start + text.length))
+        // ── Terminal Output with blinking cursor ──
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .onSizeChanged { containerWidthPx = it.width }
+                .verticalScroll(scrollState)
+                .pointerInput(Unit) {
+                    detectTapGestures {
+                        focusRequester.requestFocus()
+                        keyboardController?.show()
+                    }
+                }
+        ) {
+            SelectionContainer {
+                Text(
+                    text = displayOutput,
+                    modifier = Modifier
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    style = TextStyle(fontFamily = MonoFont, fontSize = effectiveFontSizeSp.sp, color = TermText),
+                    softWrap = false
+                )
+            }
+        }
+
+        // ── Hidden input field (captures keyboard, invisible) ──
+        BasicTextField(
+            value = hiddenInput,
+            onValueChange = { newValue ->
+                // During IME composition, just update the field but don't
+                // send anything to the shell — wait for the commit.
+                if (newValue.composition != null) {
+                    hiddenInput = newValue
+                    return@BasicTextField
+                }
+
+                // Extract real (non-padding) characters from old and new text
+                val oldReal = hiddenInput.text.replace("\u200B", "")
+                val newReal = newValue.text.replace("\u200B", "")
+
+                // Detect modifier combo from keyboard
+                if (activeModifiers.isNotEmpty() && newReal.length > oldReal.length) {
+                    val added = newReal.substring(oldReal.length)
+                    added.forEach { ch -> processCombo(activeModifiers, ch.toString()) }
+                    activeModifiers = emptySet()
+                    hiddenInput = TextFieldValue(pad, TextRange(pad.length))
+                    return@BasicTextField
+                }
+
+                when {
+                    // New real characters typed (includes space, punctuation, etc.)
+                    newReal.length > oldReal.length -> {
+                        val added = newReal.substring(oldReal.length).replace("\n", "\r")
+                        if (added.isNotEmpty()) {
+                            viewModel.sendRawToShell(added)
+                        }
+                    }
+                    // Same real length but content changed (IME replaced chars)
+                    newReal.length == oldReal.length && newReal != oldReal -> {
+                        // Find the differing portion and send it
+                        val diff = newReal.replace("\n", "\r")
+                        if (diff.isNotEmpty()) {
+                            viewModel.sendRawToShell(diff)
+                        }
+                    }
+                    // Real characters deleted = backspace
+                    newReal.length < oldReal.length -> {
+                        val count = oldReal.length - newReal.length
+                        repeat(count) { viewModel.sendRawToShell("\u007F") }
+                    }
+                }
+
+                // Detect backspace consumed padding (no real char change but total length decreased)
+                if (newReal.length == oldReal.length && newReal == oldReal) {
+                    val totalOld = hiddenInput.text.length
+                    val totalNew = newValue.text.length
+                    if (totalNew < totalOld) {
+                        val count = totalOld - totalNew
+                        repeat(count) { viewModel.sendRawToShell("\u007F") }
+                    }
+                }
+
+                // Always reset to pad after processing committed input
+                hiddenInput = TextFieldValue(pad, TextRange(pad.length))
             },
-            onSpecialKey = { key ->
-                when (key) {
-                    "UP" -> {
-                        val cmd = viewModel.getHistoryCommand(true)
-                        if (cmd != null) inputValue = TextFieldValue(cmd, TextRange(cmd.length))
-                    }
-                    "DOWN" -> {
-                        val cmd = viewModel.getHistoryCommand(false)
-                        if (cmd != null) inputValue = TextFieldValue(cmd, TextRange(cmd.length))
-                    }
-                    "ESC" -> inputValue = TextFieldValue("")
-                    "TAB" -> {
-                        val sel = inputValue.selection
-                        val newText = inputValue.text.substring(0, sel.start) + "\t" +
-                                inputValue.text.substring(sel.end)
-                        inputValue = TextFieldValue(newText, TextRange(sel.start + 1))
-                    }
+            modifier = Modifier
+                .height(1.dp)
+                .fillMaxWidth()
+                .focusRequester(focusRequester),
+            textStyle = TextStyle(fontSize = 1.sp, color = Color.Transparent),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Transparent),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(
+                onSend = {
+                    viewModel.sendRawToShell("\r")
+                    hiddenInput = TextFieldValue(pad, TextRange(pad.length))
+                }
+            )
+        )
+
+        // ── Modifier indicator ──
+        if (activeModifiers.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(TermSurface)
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text(
+                    activeModifiers.sorted().joinToString("+"),
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 6.sp, color = TermYellow)
+                )
+            }
+        }
+
+        // ── Vim Status Bar (shown in alternate screen mode) ──
+        if (isAltScreen && displayStatus.isNotEmpty()) {
+            val statusFontSizeSp = effectiveFontSizeSp * 0.75f  // status bar slightly smaller
+            Surface(color = TermSurface) {
+                Text(
+                    text = displayStatus,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    style = TextStyle(fontFamily = MonoFont, fontSize = statusFontSizeSp.sp, color = TermText),
+                    maxLines = 2
+                )
+            }
+        }
+
+        // ── Terminal Shortcut Bar ──
+        TerminalShortcutBar(
+            activeModifiers = activeModifiers,
+            onModifierToggle = { mod ->
+                activeModifiers = if (mod in activeModifiers) activeModifiers - mod else activeModifiers + mod
+            },
+            onKeyPress = { key ->
+                if (activeModifiers.isNotEmpty()) {
+                    processCombo(activeModifiers, key)
+                    activeModifiers = emptySet()
+                } else {
+                    processDirectKey(key)
+                }
+            },
+            onToggleKeyboard = {
+                if (imeBottomDp > navBarBottomDp) {
+                    focusManager.clearFocus()
+                } else {
+                    focusRequester.requestFocus()
+                    keyboardController?.show()
                 }
             }
         )
@@ -1291,20 +1521,21 @@ private fun ManualTerminalContent(
 @Composable
 private fun ManualTopBar(
     serverInfo: ServerInfo?,
-    onBack: () -> Unit,
+    isModelConfigured: Boolean,
+    onSwitchToAssist: () -> Unit,
     onDisconnect: () -> Unit,
+    isSessionDropped: Boolean,
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
     onOpenSftp: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(TermSurface)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onBack) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = TermText)
-        }
         Icon(
             Icons.Outlined.Terminal,
             contentDescription = null,
@@ -1332,18 +1563,6 @@ private fun ManualTopBar(
             }
         }
 
-        // "手动" mode badge
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = TermYellow.copy(alpha = 0.15f)
-        ) {
-            Text(
-                "手动",
-                style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermYellow),
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-            )
-        }
-
         // SFTP button
         IconButton(onClick = onOpenSftp) {
             Icon(
@@ -1354,161 +1573,99 @@ private fun ManualTopBar(
             )
         }
 
-        // Disconnect button
+        // "辅助" mode switch badge
         Surface(
-            onClick = onDisconnect,
+            onClick = onSwitchToAssist,
             shape = RoundedCornerShape(16.dp),
-            color = TermRed.copy(alpha = 0.1f)
+            color = if (isModelConfigured) TermGreen.copy(alpha = 0.15f) else TermDim.copy(alpha = 0.15f)
         ) {
             Text(
-                "断开",
-                style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermRed),
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                "辅助",
+                style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp,
+                    color = if (isModelConfigured) TermGreen else TermDim),
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             )
         }
+
+        ConnectionStatusButton(isSessionDropped, isReconnecting, onReconnect, onDisconnect)
     }
 }
 
 // ═══════════════════════════════════════
-//  Manual Input Bar (direct command)
+//  Terminal Shortcut Bar (Termux-style)
 // ═══════════════════════════════════════
 
 @Composable
-private fun ManualInputBar(
-    value: TextFieldValue,
-    onValueChange: (TextFieldValue) -> Unit,
-    onSend: () -> Unit
+private fun TerminalShortcutBar(
+    activeModifiers: Set<String>,
+    onModifierToggle: (String) -> Unit,
+    onKeyPress: (String) -> Unit,
+    onToggleKeyboard: () -> Unit
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = TermSurface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, TermBorder)
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        ) {
-            Text(
-                "$ ",
-                style = TextStyle(fontFamily = MonoFont, fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold, color = TermGreen),
-                modifier = Modifier.padding(start = 8.dp)
-            )
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 4.dp, vertical = 10.dp),
-                textStyle = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermText),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(TermGreen),
-                maxLines = 3,
-                decorationBox = { innerTextField ->
-                    Box {
-                        if (value.text.isEmpty()) {
-                            Text(
-                                "输入命令...",
-                                style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermDim)
-                            )
-                        }
-                        innerTextField()
-                    }
-                }
-            )
+    val isFnActive = "FN" in activeModifiers
+    val row1 = if (isFnActive)
+        listOf("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "←")
+    else
+        listOf("ESC", "/", "|", "-", "↑", "HOME", "END", "PGUP", "FN")
+    val row2 = if (isFnActive)
+        listOf("F9", "F10", "F11", "F12", "", "", "", "", "⌨")
+    else
+        listOf("TAB", "CTRL", "ALT", "←", "↓", "→", "PGDN", ":", "⌨")
+    val modifierKeys = setOf("CTRL", "ALT", "FN")
 
-            val canSend = value.text.isNotBlank()
-            IconButton(
-                onClick = onSend,
-                enabled = canSend
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "执行",
-                    tint = if (canSend) TermGreen else TermDim,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════
-//  Shortcut Key Bar (collapsible)
-// ═══════════════════════════════════════
-
-@Composable
-private fun ShortcutKeyBar(
-    expanded: Boolean,
-    onToggleExpand: () -> Unit,
-    onInsertText: (String) -> Unit,
-    onSpecialKey: (String) -> Unit
-) {
-    val row1Special = listOf("↑" to "UP", "↓" to "DOWN", "Tab" to "TAB", "Esc" to "ESC")
-    val row1Symbols = listOf("|", ">", "<", "&", ";", "~", "/", "\\")
-    val row2 = listOf("`", "#", "$", "*", "?", "@", "!", "^", "(", ")", "[", "]", "{", "}", "=", "\"", "'", "_")
-
-    Surface(
-        color = TermSurface,
-        border = androidx.compose.foundation.BorderStroke(0.5.dp, TermBorder.copy(alpha = 0.5f))
-    ) {
-        Column {
-            // Toggle bar
+    Surface(color = TermSurface) {
+        Column(modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp)) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onToggleExpand() }
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                Icon(
-                    if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
-                    contentDescription = null,
-                    tint = TermDim,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    "快捷键",
-                    style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermDim)
-                )
+                row1.forEach { key ->
+                    if (key.isEmpty()) {
+                        Spacer(Modifier.weight(1f))
+                    } else if (isFnActive && key == "←") {
+                        // Back arrow exits FN mode
+                        TermKeyButton(
+                            label = "←",
+                            isActive = true,
+                            modifier = Modifier.weight(1f),
+                            onClick = { onModifierToggle("FN") }
+                        )
+                    } else {
+                        val isModifier = key in modifierKeys
+                        val isActive = key in activeModifiers
+                        TermKeyButton(
+                            label = key,
+                            isActive = isActive,
+                            modifier = Modifier.weight(1f),
+                            onClick = { if (isModifier) onModifierToggle(key) else onKeyPress(key) }
+                        )
+                    }
+                }
             }
-
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically(),
-                exit = shrinkVertically()
+            Spacer(Modifier.height(2.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                Column(modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
-                    // Row 1: special keys + common shell symbols
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        row1Special.forEach { (label, key) ->
-                            ShortcutButton(label) { onSpecialKey(key) }
-                        }
-                        row1Symbols.forEach { symbol ->
-                            ShortcutButton(symbol) { onInsertText(symbol) }
-                        }
+                row2.forEach { key ->
+                    if (key.isEmpty()) {
+                        Spacer(Modifier.weight(1f))
+                    } else {
+                        val isModifier = key in modifierKeys
+                        val isActive = key in activeModifiers
+                        TermKeyButton(
+                            label = key,
+                            isActive = isActive,
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                when {
+                                    key == "⌨" -> onToggleKeyboard()
+                                    isModifier -> onModifierToggle(key)
+                                    else -> onKeyPress(key)
+                                }
+                            }
+                        )
                     }
-                    Spacer(Modifier.height(4.dp))
-                    // Row 2: more symbols
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        row2.forEach { symbol ->
-                            ShortcutButton(symbol) { onInsertText(symbol) }
-                        }
-                    }
-                    Spacer(Modifier.height(2.dp))
                 }
             }
         }
@@ -1516,17 +1673,31 @@ private fun ShortcutKeyBar(
 }
 
 @Composable
-private fun ShortcutButton(label: String, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(4.dp),
-        color = TermCard,
-        border = androidx.compose.foundation.BorderStroke(0.5.dp, TermBorder)
+private fun TermKeyButton(
+    label: String,
+    isActive: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clickable(onClick = onClick)
+            .background(
+                if (isActive) TermGreen.copy(alpha = 0.25f) else Color.Transparent,
+                RoundedCornerShape(4.dp)
+            )
+            .padding(vertical = 7.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             label,
-            style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp, color = TermText),
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+            style = TextStyle(
+                fontFamily = MonoFont,
+                fontSize = 10.sp,
+                fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
+                color = if (isActive) TermGreen else TermText
+            ),
+            maxLines = 1
         )
     }
 }

@@ -29,6 +29,8 @@ class SshManager private constructor(context: Context) {
         private const val TAG = "SshManager"
         private val jsch = JSch()
         private val sessions = ConcurrentHashMap<String, SessionEntry>()
+        private val activeExecChannels = ConcurrentHashMap<String, ChannelExec>()
+        private val activeShells = ConcurrentHashMap<String, ShellSession>()
 
         @Volatile
         private var INSTANCE: SshManager? = null
@@ -48,6 +50,12 @@ class SshManager private constructor(context: Context) {
         val createdAt: Long = System.currentTimeMillis()
     )
 
+    data class ShellSession(
+        val channel: ChannelShell,
+        val inputStream: java.io.InputStream,
+        val outputStream: java.io.OutputStream
+    )
+
     /** Public session info for UI display. */
     data class SshSessionInfo(
         val sessionId: String,
@@ -57,25 +65,18 @@ class SshManager private constructor(context: Context) {
         val createdAt: Long
     )
 
-    /** Get info for a specific session (for SSH mode UI). */
+    /** Get info for a specific session (for SSH mode UI). Does NOT remove disconnected entries. */
     fun getSessionInfo(sessionId: String): SshSessionInfo? {
         val entry = sessions[sessionId] ?: return null
-        if (!entry.session.isConnected) {
-            android.util.Log.w(TAG, "getSessionInfo: session $sessionId is disconnected, removing")
-            sessions.remove(sessionId)
-            return null
-        }
         return SshSessionInfo(sessionId, entry.host, entry.port, entry.username, entry.createdAt)
     }
 
-    /** Get all active session infos. */
+    /** Get all active (connected) session infos. Removes entries for dead sessions. */
     fun getActiveSessions(): List<SshSessionInfo> {
-        android.util.Log.d(TAG, "getActiveSessions: sessions keys = ${sessions.keys}")
         val result = mutableListOf<SshSessionInfo>()
         val toRemove = mutableListOf<String>()
         for ((id, entry) in sessions) {
             if (!entry.session.isConnected) {
-                android.util.Log.w(TAG, "getActiveSessions: session $id is disconnected")
                 toRemove.add(id)
             } else {
                 result.add(SshSessionInfo(id, entry.host, entry.port, entry.username, entry.createdAt))
@@ -123,7 +124,9 @@ class SshManager private constructor(context: Context) {
             // Set up private key if provided
             if (resolvedKey != null) {
                 val keyBytes = resolvedKey.toByteArray(Charsets.UTF_8)
-                jsch.addIdentity("key_${System.currentTimeMillis()}", keyBytes, null, null)
+                val identityName = "key_${resolvedUser}@${host}:${port}"
+                try { jsch.removeIdentity(identityName) } catch (_: Exception) {}
+                jsch.addIdentity(identityName, keyBytes, null, null)
             }
 
             val session = jsch.getSession(resolvedUser, host, port)
@@ -223,6 +226,7 @@ class SshManager private constructor(context: Context) {
             val stdoutStream = channel.inputStream
             val stderrStream = channel.errStream
 
+            activeExecChannels[sessionId] = channel
             channel.connect(30_000) // 30s connect timeout for the channel itself
 
             val stdoutBuf = StringBuilder()
@@ -290,6 +294,19 @@ class SshManager private constructor(context: Context) {
             }.toString(2)
         } catch (e: Exception) {
             "Error: 命令执行失败: ${e.message}"
+        } finally {
+            activeExecChannels.remove(sessionId)
+        }
+    }
+
+    /** Interrupt a running command on an SSH session. */
+    fun interruptCommand(sessionId: String): Boolean {
+        val channel = activeExecChannels[sessionId] ?: return false
+        return try {
+            channel.disconnect()
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -416,8 +433,55 @@ class SshManager private constructor(context: Context) {
         }
     }
 
+    /** Check if a session's JSch connection is still alive. */
+    fun isSessionAlive(sessionId: String): Boolean {
+        val entry = sessions[sessionId] ?: return false
+        return entry.session.isConnected
+    }
+
+    /** Reconnect a dead session using its stored host/port/username + provided password.
+     *  Returns a new session ID on success, or an error string. */
+    fun reconnect(
+        oldSessionId: String,
+        password: String? = null,
+        privateKey: String? = null
+    ): String {
+        // Read connection info before removing — entry may already be gone on retries
+        val entry = sessions[oldSessionId]
+        val host: String
+        val port: Int
+        val username: String
+        if (entry != null) {
+            host = entry.host
+            port = entry.port
+            username = entry.username
+            // Clean up old session
+            sessions.remove(oldSessionId)
+            closeShell(oldSessionId)
+            try { entry.session.disconnect() } catch (_: Exception) {}
+        } else {
+            // Entry already removed (e.g. by getActiveSessions or previous retry).
+            // Caller must supply enough info via password/privateKey; we cannot reconnect.
+            return "Error: 会话信息丢失，无法重连"
+        }
+        return connect(
+            host = host,
+            port = port,
+            username = username,
+            password = password,
+            privateKey = privateKey
+        )
+    }
+
+    /** Get host/port/username for a session (even if disconnected). */
+    fun getSessionConnectInfo(sessionId: String): Triple<String, Int, String>? {
+        val entry = sessions[sessionId] ?: return null
+        return Triple(entry.host, entry.port, entry.username)
+    }
+
     /** Disconnect an SSH session. */
     fun disconnect(sessionId: String): String {
+        closeShell(sessionId)
         val entry = sessions.remove(sessionId)
             ?: return "Error: 会话 '$sessionId' 不存在。"
         try {
@@ -461,7 +525,7 @@ class SshManager private constructor(context: Context) {
             val channel = entry.session.openChannel("sftp") as ChannelSftp
             channel.connect(10_000)
             localFile.parentFile?.mkdirs()
-            channel.get(remotePath, java.io.FileOutputStream(localFile))
+            java.io.FileOutputStream(localFile).use { fos -> channel.get(remotePath, fos) }
             channel.disconnect()
             Result.success(localFile.length())
         } catch (e: SftpException) {
@@ -479,7 +543,7 @@ class SshManager private constructor(context: Context) {
             channel.connect(10_000)
             val parentDir = remotePath.substringBeforeLast('/', "")
             if (parentDir.isNotBlank()) mkdirRecursive(channel, parentDir)
-            channel.put(java.io.FileInputStream(localFile), remotePath)
+            java.io.FileInputStream(localFile).use { fis -> channel.put(fis, remotePath) }
             channel.disconnect()
             Result.success(localFile.length())
         } catch (e: SftpException) {
@@ -725,11 +789,108 @@ class SshManager private constructor(context: Context) {
         }
     }
 
+    /** Open an interactive shell channel with PTY. */
+    fun openShell(sessionId: String, cols: Int = 120, rows: Int = 40): Boolean {
+        val entry = sessions[sessionId] ?: return false
+        if (!entry.session.isConnected) return false
+        closeShell(sessionId)
+        return try {
+            val channel = entry.session.openChannel("shell") as ChannelShell
+            channel.setPtyType("xterm-256color", cols, rows, 0, 0)
+            val inputStream = channel.inputStream
+            val outputStream = channel.outputStream
+            channel.connect(30_000)
+            activeShells[sessionId] = ShellSession(channel, inputStream, outputStream)
+            true
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "openShell failed: ${e.message}")
+            false
+        }
+    }
+
+    /** Write text to the shell's input stream. */
+    fun writeToShell(sessionId: String, data: String) {
+        val shell = activeShells[sessionId] ?: return
+        try {
+            shell.outputStream.write(data.toByteArray(Charsets.UTF_8))
+            shell.outputStream.flush()
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "writeToShell failed: ${e.message}")
+        }
+    }
+
+    /** Write raw bytes to the shell (for control characters). */
+    fun writeToShell(sessionId: String, data: ByteArray) {
+        val shell = activeShells[sessionId] ?: return
+        try {
+            shell.outputStream.write(data)
+            shell.outputStream.flush()
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "writeToShell bytes failed: ${e.message}")
+        }
+    }
+
+    /** Write text with retry on transient failure (up to 3 attempts). */
+    fun writeToShellWithRetry(sessionId: String, data: String, maxRetries: Int = 3) {
+        val bytes = data.toByteArray(Charsets.UTF_8)
+        writeWithRetry(sessionId, bytes, maxRetries)
+    }
+
+    /** Write raw bytes with retry on transient failure (up to 3 attempts). */
+    fun writeToShellWithRetry(sessionId: String, data: ByteArray, maxRetries: Int = 3) {
+        writeWithRetry(sessionId, data, maxRetries)
+    }
+
+    private fun writeWithRetry(sessionId: String, data: ByteArray, maxRetries: Int) {
+        for (attempt in 0 until maxRetries) {
+            val shell = activeShells[sessionId] ?: return
+            try {
+                shell.outputStream.write(data)
+                shell.outputStream.flush()
+                return // success
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "writeToShell attempt ${attempt + 1}/$maxRetries failed: ${e.message}")
+                if (attempt < maxRetries - 1) {
+                    try { Thread.sleep(50L * (attempt + 1)) } catch (_: InterruptedException) { return }
+                }
+            }
+        }
+        android.util.Log.e(TAG, "writeToShell failed after $maxRetries attempts for session $sessionId")
+    }
+
+    /** Get the shell's input stream for reading output. */
+    fun getShellInputStream(sessionId: String): java.io.InputStream? {
+        return activeShells[sessionId]?.inputStream
+    }
+
+    /** Check if a shell channel is still open. */
+    fun isShellOpen(sessionId: String): Boolean {
+        val shell = activeShells[sessionId] ?: return false
+        return !shell.channel.isClosed
+    }
+
+    /** Resize the PTY window for an active shell. */
+    fun resizePty(sessionId: String, cols: Int, rows: Int) {
+        val shell = activeShells[sessionId] ?: return
+        try {
+            shell.channel.setPtySize(cols, rows, 0, 0)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "resizePty failed: ${e.message}")
+        }
+    }
+
+    /** Close an interactive shell channel. */
+    fun closeShell(sessionId: String) {
+        val shell = activeShells.remove(sessionId) ?: return
+        try { shell.channel.disconnect() } catch (_: Exception) {}
+    }
+
     /** Disconnect all sessions — call on app shutdown. */
     fun disconnectAll() {
-        for ((_, entry) in sessions) {
-            try { entry.session.disconnect() } catch (_: Exception) {}
-        }
+        activeShells.keys.toList().forEach { closeShell(it) }
+        activeExecChannels.values.forEach { try { it.disconnect() } catch (_: Exception) {} }
+        activeExecChannels.clear()
+        sessions.values.forEach { try { it.session.disconnect() } catch (_: Exception) {} }
         sessions.clear()
     }
 

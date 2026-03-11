@@ -337,6 +337,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     skillStorage.loadAll().filter { it.intentInjections.isNotEmpty() && !it.isBuiltIn }
                 }
 
+                // Snapshot active SSH sessions before orchestrator runs
+                val sessionsBefore = toolExecutor.sshManager.getActiveSessions()
+                    .map { it.sessionId }.toSet()
+
                 val result = orchestrator.run(apiMessages, _activeSkill.value, _deepThinking.value,
                     injectionSkills = injectionSkills,
                     onStep = { step ->
@@ -370,17 +374,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _messages.update { it + assistantMessage }
                 _agentSteps.value = emptyList()
 
-                // Detect if SSH was connected → offer SSH mode
-                val sshStepConnected = collectedSteps.any {
-                    it.type == StepType.TOOL_RESULT &&
-                    it.description.startsWith("✓ ssh_connect") &&
-                    it.detail.contains("session_id")
-                }
-                if (sshStepConnected) {
-                    val sessions = toolExecutor.sshManager.getActiveSessions()
-                    if (sessions.isNotEmpty()) {
-                        _pendingSshSession.value = sessions.last().sessionId
-                    }
+                // Detect if a new SSH session was created → offer SSH mode
+                val sessionsAfter = toolExecutor.sshManager.getActiveSessions()
+                val newSessions = sessionsAfter.filter { it.sessionId !in sessionsBefore }
+                if (newSessions.isNotEmpty()) {
+                    _pendingSshSession.value = newSessions.last().sessionId
                 }
 
                 saveCurrentConversation()

@@ -101,11 +101,9 @@ object PromptAssembler {
             appendLine()
             appendLine("### 规则")
             appendLine(BuiltInSkills.RULE_BASE)
-            if (intent == UserIntent.CREATE_APP && phase == AgentPhase.PLANNING) {
+            if (intent.needsApp() && phase == AgentPhase.PLANNING) {
                 appendLine(BuiltInSkills.RULES_PLANNING_APP)
             } else if (intent.needsApp() && phase != AgentPhase.PLANNING) {
-                appendLine(BuiltInSkills.RULES_GENERATION_APP)
-            } else if (intent == UserIntent.MODIFY_APP && phase == AgentPhase.PLANNING) {
                 appendLine(BuiltInSkills.RULES_GENERATION_APP)
             }
             if (bridgeDocs.isNotBlank()) {

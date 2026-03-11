@@ -80,6 +80,8 @@ import com.example.link_pi.ui.settings.SettingsScreen
 import com.example.link_pi.ui.settings.ShareScreen
 import com.example.link_pi.ui.permission.PermissionScreen
 import com.example.link_pi.ui.permission.allPermissionsGranted
+import com.example.link_pi.ui.ssh.SshHomeScreen
+import com.example.link_pi.ui.ssh.SshHomeViewModel
 import com.example.link_pi.ui.ssh.SshScreen
 import com.example.link_pi.ui.ssh.SshViewModel
 import com.example.link_pi.ui.skill.SkillListScreen
@@ -101,6 +103,7 @@ sealed class Screen(val route: String, val title: String) {
     data object ModuleSettings : Screen("settings/modules", "模块管理")
     data object CredentialSettings : Screen("settings/credentials", "凭据管理")
     data object ShareSettings : Screen("settings/share", "本地分享")
+    data object SshHome : Screen("ssh_home", "SSH 终端")
     data object SshMode : Screen("ssh_mode", "SSH Terminal")
 }
 
@@ -117,8 +120,10 @@ fun LinkPiApp() {
     val chatViewModel: ChatViewModel = viewModel()
     val workbenchViewModel: WorkbenchViewModel = viewModel()
     val sshViewModel: SshViewModel = viewModel()
+    val sshHomeViewModel: SshHomeViewModel = viewModel()
     var currentPage by remember { mutableStateOf<String>(Screen.Chat.route) }
     var editModelId by remember { mutableStateOf("") }
+
     var activeDetailTaskId by remember { mutableStateOf("") }
     var lastBackTime by remember { mutableLongStateOf(0L) }
     var showConversationList by remember { mutableStateOf(false) }
@@ -147,6 +152,7 @@ fun LinkPiApp() {
             Screen.ShareSettings.route -> currentPage = Screen.Settings.route
             Screen.ModelEdit("").route -> currentPage = Screen.ModelManage.route
             Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
+            Screen.SshHome.route -> currentPage = Screen.Workbench.route
             else -> currentPage = Screen.Chat.route
         }
     }
@@ -156,8 +162,12 @@ fun LinkPiApp() {
         SshScreen(
             viewModel = sshViewModel,
             onBack = {
+                sshViewModel.exitScreen()
+                currentPage = Screen.SshHome.route
+            },
+            onDisconnect = {
                 sshViewModel.disconnect()
-                currentPage = Screen.Chat.route
+                currentPage = Screen.SshHome.route
             }
         )
         return
@@ -249,8 +259,9 @@ fun LinkPiApp() {
             }
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-        // ── Fixed Top Bar (hidden on Workbench pages) ──
-        if (currentPage != Screen.WorkbenchDetail.route && currentPage != Screen.Workbench.route) {
+        // ── Fixed Top Bar (hidden on Workbench / SSH Home pages) ──
+        if (currentPage != Screen.WorkbenchDetail.route && currentPage != Screen.Workbench.route
+            && currentPage != Screen.SshHome.route) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -342,7 +353,8 @@ fun LinkPiApp() {
                         },
                         onNewTask = {
                             currentPage = Screen.Chat.route
-                        }
+                        },
+                        onOpenSsh = { currentPage = Screen.SshHome.route }
                     )
                 }
                 Screen.WorkbenchDetail.route -> {
@@ -377,6 +389,15 @@ fun LinkPiApp() {
                     onRunApp = { app ->
                         chatViewModel.setCurrentApp(app)
                         currentPage = Screen.MiniApp.route
+                    }
+                )
+                Screen.SshHome.route -> SshHomeScreen(
+                    viewModel = sshHomeViewModel,
+                    onBack = { currentPage = Screen.Workbench.route },
+                    onEnterSession = { sessionId, manualMode ->
+                        sshViewModel.enterSession(sessionId)
+                        if (manualMode) sshViewModel.setManualMode(true)
+                        currentPage = Screen.SshMode.route
                     }
                 )
                 Screen.Settings.route -> SettingsScreen(

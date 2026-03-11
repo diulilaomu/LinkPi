@@ -88,6 +88,9 @@ class SftpViewModel(application: Application) : AndroidViewModel(application) {
     private val _editingContent = MutableStateFlow("")
     val editingContent: StateFlow<String> = _editingContent.asStateFlow()
 
+    private val _isEditorLoading = MutableStateFlow(false)
+    val isEditorLoading: StateFlow<Boolean> = _isEditorLoading.asStateFlow()
+
     private val _isSaving = MutableStateFlow(false)
     val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
 
@@ -268,8 +271,7 @@ class SftpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun copySingleFile(fileName: String) {
-        val sid = sessionId ?: return
-        val src = _currentPath.value + fileName
+        sessionId ?: return
         _pendingBatchOp.value = BatchOp.COPY
         batchSourceDir = _currentPath.value
         batchSourceFiles = listOf(fileName)
@@ -277,8 +279,7 @@ class SftpViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun moveSingleFile(fileName: String) {
-        val sid = sessionId ?: return
-        val src = _currentPath.value + fileName
+        sessionId ?: return
         _pendingBatchOp.value = BatchOp.MOVE
         batchSourceDir = _currentPath.value
         batchSourceFiles = listOf(fileName)
@@ -410,10 +411,11 @@ class SftpViewModel(application: Application) : AndroidViewModel(application) {
         val remotePath = _currentPath.value + fileName
         _editingFile.value = remotePath
         _editingContent.value = ""
+        _isEditorLoading.value = true
         viewModelScope.launch(Dispatchers.IO) {
             sshManager.readFileContent(sid, remotePath).fold(
-                onSuccess = { _editingContent.value = it },
-                onFailure = { _error.value = "读取失败: ${it.message}"; _editingFile.value = null }
+                onSuccess = { _editingContent.value = it; _isEditorLoading.value = false },
+                onFailure = { _error.value = "读取失败: ${it.message}"; _editingFile.value = null; _isEditorLoading.value = false }
             )
         }
     }
@@ -432,7 +434,7 @@ class SftpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun closeEditor() { _editingFile.value = null; _editingContent.value = "" }
+    fun closeEditor() { _editingFile.value = null; _editingContent.value = ""; _isEditorLoading.value = false }
 
     // ═══════════════════════════════════════
     //  Utils

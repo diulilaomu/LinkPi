@@ -115,13 +115,19 @@ class MemoryExtractor(
         return null
     }
 
-    /** Simple similarity check — if >70% of words overlap, consider it duplicate. */
+    /** Similarity check using character n-gram overlap (works for Chinese and English). */
     private fun isSimilar(a: String, b: String): Boolean {
-        val wordsA = a.lowercase().split(Regex("[\\s,;，；。！？]+")).filter { it.length > 1 }.toSet()
-        val wordsB = b.lowercase().split(Regex("[\\s,;，；。！？]+")).filter { it.length > 1 }.toSet()
-        if (wordsA.isEmpty() || wordsB.isEmpty()) return false
-        val overlap = wordsA.intersect(wordsB).size
-        val minSize = minOf(wordsA.size, wordsB.size)
+        val ngramSize = 2
+        fun ngrams(s: String): Set<String> {
+            val clean = s.lowercase().replace(Regex("[\\s,;，；。！？]+"), "")
+            if (clean.length < ngramSize) return setOf(clean)
+            return (0..clean.length - ngramSize).map { clean.substring(it, it + ngramSize) }.toSet()
+        }
+        val ngramsA = ngrams(a)
+        val ngramsB = ngrams(b)
+        if (ngramsA.isEmpty() || ngramsB.isEmpty()) return false
+        val overlap = ngramsA.intersect(ngramsB).size
+        val minSize = minOf(ngramsA.size, ngramsB.size)
         return overlap.toDouble() / minSize > 0.7
     }
 }

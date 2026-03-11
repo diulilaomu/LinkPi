@@ -1,6 +1,7 @@
 package com.example.link_pi.network
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
@@ -77,7 +78,7 @@ class AiService(private val config: AiConfig) {
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {
                 if (isNetworkReachable()) return@withContext true
-                Thread.sleep(2000)
+                delay(2000)
             }
             false
         }
@@ -129,7 +130,7 @@ class AiService(private val config: AiConfig) {
             .build()
 
         var lastException: Exception? = null
-        for (attempt in 0..MAX_RETRIES) {
+        for (attempt in 0 until MAX_RETRIES) {
             try {
                 val response = client.newCall(request).execute()
                 response.use { resp ->
@@ -146,19 +147,19 @@ class AiService(private val config: AiConfig) {
                     }
 
                     val code = resp.code
-                    if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                    if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES - 1) {
                         lastException = IOException("API $code ($endpoint): $body")
-                        Thread.sleep(BACKOFF_MS[attempt])
+                        delay(BACKOFF_MS[attempt])
                     } else {
                         throw IOException("API $code ($endpoint): $body")
                     }
                 }
             } catch (e: IOException) {
                 lastException = e
-                if (attempt < MAX_RETRIES) {
+                if (attempt < MAX_RETRIES - 1) {
                     // Wait for network recovery instead of blind backoff
                     waitForNetwork(30_000)
-                    Thread.sleep(BACKOFF_MS[attempt])
+                    delay(BACKOFF_MS[attempt])
                     continue
                 }
                 throw e
@@ -204,7 +205,7 @@ class AiService(private val config: AiConfig) {
 
         var successResponse: okhttp3.Response? = null
         var lastException: Exception? = null
-        for (attempt in 0..MAX_RETRIES) {
+        for (attempt in 0 until MAX_RETRIES) {
             try {
                 val resp = streamingClient.newCall(request).execute()
                 if (resp.isSuccessful) {
@@ -213,17 +214,17 @@ class AiService(private val config: AiConfig) {
                 }
                 val code = resp.code
                 val body = resp.use { it.body?.string() ?: "" }
-                if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES) {
+                if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES - 1) {
                     lastException = IOException("API $code ($endpoint): $body")
-                    Thread.sleep(BACKOFF_MS[attempt])
+                    delay(BACKOFF_MS[attempt])
                     continue
                 }
                 throw IOException("API $code ($endpoint): $body")
             } catch (e: IOException) {
                 lastException = e
-                if (attempt < MAX_RETRIES) {
+                if (attempt < MAX_RETRIES - 1) {
                     waitForNetwork(30_000)
-                    Thread.sleep(BACKOFF_MS[attempt])
+                    delay(BACKOFF_MS[attempt])
                     continue
                 }
                 throw e

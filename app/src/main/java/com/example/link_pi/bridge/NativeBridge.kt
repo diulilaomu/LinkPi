@@ -139,10 +139,10 @@ class NativeBridge(
                         put("longitude", location.longitude)
                         put("accuracy", location.accuracy.toDouble())
                     }.toString()
-                } else ""
-            } else ""
+                } else JSONObject().apply { put("error", "no_location") }.toString()
+            } else JSONObject().apply { put("error", "no_permission") }.toString()
         } catch (_: Exception) {
-            ""
+            JSONObject().apply { put("error", "exception") }.toString()
         }
     }
 

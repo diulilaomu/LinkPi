@@ -1,6 +1,7 @@
 package com.example.link_pi.ui.sftp
 
 import androidx.activity.compose.BackHandler
+import com.example.link_pi.ui.theme.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,22 +54,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 // ═══════════════════════════════════════
-//  Theme
-// ═══════════════════════════════════════
-
-private val EditorBg = Color(0xFF0D1117)
-private val EditorSurface = Color(0xFF161B22)
-private val EditorCard = Color(0xFF1C2128)
-private val EditorBorder = Color(0xFF30363D)
-private val EditorGreen = Color(0xFF3FB950)
-private val EditorYellow = Color(0xFFD29922)
-private val EditorRed = Color(0xFFF85149)
-private val EditorCyan = Color(0xFF58A6FF)
-private val EditorText = Color(0xFFE6EDF3)
-private val EditorDim = Color(0xFF8B949E)
-private val MonoFont = FontFamily.Monospace
-
-// ═══════════════════════════════════════
 //  File Editor Screen
 // ═══════════════════════════════════════
 
@@ -79,6 +64,7 @@ fun FileEditorScreen(
 ) {
     val editingFile by viewModel.editingFile.collectAsState()
     val editingContent by viewModel.editingContent.collectAsState()
+    val isEditorLoading by viewModel.isEditorLoading.collectAsState()
     val isSaving by viewModel.isSaving.collectAsState()
 
     // System back: close editor and return to SFTP
@@ -125,11 +111,11 @@ fun FileEditorScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(EditorBg)
+            .background(TermBg)
             .statusBarsPadding()
     ) {
         // ── Top Bar ──
-        Surface(color = EditorSurface) {
+        Surface(color = TermSurface) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -140,18 +126,18 @@ fun FileEditorScreen(
                     viewModel.closeEditor()
                     onBack()
                 }) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = EditorText, modifier = Modifier.size(20.dp))
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = TermText, modifier = Modifier.size(20.dp))
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         fileName,
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = EditorText),
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TermText),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
                         editingFile ?: "",
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 9.sp, color = EditorDim),
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 9.sp, color = TermDim),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -161,7 +147,7 @@ fun FileEditorScreen(
                     Icon(
                         if (showFindReplace) Icons.Filled.Close else Icons.Filled.Search,
                         "查找",
-                        tint = if (showFindReplace) EditorCyan else EditorDim,
+                        tint = if (showFindReplace) TermCyan else TermDim,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -174,9 +160,9 @@ fun FileEditorScreen(
                     enabled = !isSaving
                 ) {
                     if (isSaving) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = EditorCyan)
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = TermCyan)
                     } else {
-                        Icon(Icons.Filled.Save, "保存", tint = EditorGreen, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Filled.Save, "保存", tint = TermGreen, modifier = Modifier.size(18.dp))
                     }
                 }
             }
@@ -225,12 +211,12 @@ fun FileEditorScreen(
             )
         }
 
-        HorizontalDivider(color = EditorBorder)
+        HorizontalDivider(color = TermBorder)
 
         // ── Editor ──
-        if (editingFile != null && editingContent.isEmpty() && !isSaving) {
+        if (editingFile != null && isEditorLoading && !isSaving) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = EditorCyan, modifier = Modifier.size(24.dp))
+                CircularProgressIndicator(color = TermCyan, modifier = Modifier.size(24.dp))
             }
         } else {
             val scrollState = rememberScrollState()
@@ -249,10 +235,10 @@ fun FileEditorScreen(
                     textStyle = TextStyle(
                         fontFamily = MonoFont,
                         fontSize = 12.sp,
-                        color = EditorText,
+                        color = TermText,
                         lineHeight = 18.sp
                     ),
-                    cursorBrush = SolidColor(EditorGreen),
+                    cursorBrush = SolidColor(TermGreen),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -277,11 +263,11 @@ private fun FindReplaceBar(
     onReplace: () -> Unit,
     onReplaceAll: () -> Unit
 ) {
-    Surface(color = EditorCard) {
+    Surface(color = TermCard) {
         Column(modifier = Modifier.padding(8.dp)) {
             // Search row
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.Search, null, tint = EditorDim, modifier = Modifier.size(14.dp))
+                Icon(Icons.Filled.Search, null, tint = TermDim, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(6.dp))
                 SearchField(
                     value = searchQuery,
@@ -293,14 +279,14 @@ private fun FindReplaceBar(
                 if (searchQuery.isNotBlank()) {
                     Text(
                         "${if (matchCount > 0) currentMatch + 1 else 0}/$matchCount",
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = EditorDim)
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermDim)
                     )
                 }
                 IconButton(onClick = onPrev, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Filled.KeyboardArrowUp, "上一个", tint = EditorDim, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Filled.KeyboardArrowUp, "上一个", tint = TermDim, modifier = Modifier.size(16.dp))
                 }
                 IconButton(onClick = onNext, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Filled.KeyboardArrowDown, "下一个", tint = EditorDim, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Filled.KeyboardArrowDown, "下一个", tint = TermDim, modifier = Modifier.size(16.dp))
                 }
             }
 
@@ -308,7 +294,7 @@ private fun FindReplaceBar(
 
             // Replace row
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.FindReplace, null, tint = EditorDim, modifier = Modifier.size(14.dp))
+                Icon(Icons.Filled.FindReplace, null, tint = TermDim, modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(6.dp))
                 SearchField(
                     value = replaceQuery,
@@ -320,11 +306,11 @@ private fun FindReplaceBar(
                 Surface(
                     onClick = onReplace,
                     shape = RoundedCornerShape(4.dp),
-                    color = EditorCyan.copy(alpha = 0.15f)
+                    color = TermCyan.copy(alpha = 0.15f)
                 ) {
                     Text(
                         "替换",
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = EditorCyan),
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermCyan),
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
@@ -332,11 +318,11 @@ private fun FindReplaceBar(
                 Surface(
                     onClick = onReplaceAll,
                     shape = RoundedCornerShape(4.dp),
-                    color = EditorYellow.copy(alpha = 0.15f)
+                    color = TermYellow.copy(alpha = 0.15f)
                 ) {
                     Text(
                         "全部",
-                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = EditorYellow),
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermYellow),
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                     )
                 }
@@ -354,7 +340,7 @@ private fun SearchField(
 ) {
     Surface(
         shape = RoundedCornerShape(4.dp),
-        color = EditorBg,
+        color = TermBg,
         modifier = modifier.height(28.dp)
     ) {
         Box(
@@ -364,7 +350,7 @@ private fun SearchField(
             if (value.isBlank()) {
                 Text(
                     placeholder,
-                    style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = EditorDim)
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermDim)
                 )
             }
             // Use TextFieldValue for IME safety
@@ -372,8 +358,8 @@ private fun SearchField(
             BasicTextField(
                 value = tfv,
                 onValueChange = { tfv = it; onValueChange(it.text) },
-                textStyle = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = EditorText),
-                cursorBrush = SolidColor(EditorGreen),
+                textStyle = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermText),
+                cursorBrush = SolidColor(TermGreen),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -404,3 +390,4 @@ private fun selectNthMatch(text: String, query: String, n: Int): TextFieldValue 
         TextFieldValue(text)
     }
 }
+
