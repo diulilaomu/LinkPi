@@ -13,7 +13,12 @@ import com.example.link_pi.agent.StepType
 import com.example.link_pi.agent.ToolExecutor
 import com.example.link_pi.agent.WorkbenchRedirect
 import com.example.link_pi.data.ConversationStorage
+import com.example.link_pi.data.SessionRegistry
 import com.example.link_pi.data.model.Attachment
+import com.example.link_pi.data.model.ManagedSession
+import com.example.link_pi.data.model.SessionSource
+import com.example.link_pi.data.model.SessionStatus
+import com.example.link_pi.data.model.SessionType
 import com.example.link_pi.data.model.ChatMessage
 import com.example.link_pi.data.model.Conversation
 import com.example.link_pi.data.model.MiniApp
@@ -31,6 +36,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -44,9 +51,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val orchestrator = AgentOrchestrator(aiService, toolExecutor)
     private val memoryExtractor = MemoryExtractor(aiService, toolExecutor.memoryStorage)
     private val conversationStorage = ConversationStorage(application)
+    private val sessionRegistry = SessionRegistry.getInstance(application)
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+
+    private val saveMutex = Mutex()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -79,8 +89,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _activeConversationId = MutableStateFlow<String?>(null)
     val activeConversationId: StateFlow<String?> = _activeConversationId.asStateFlow()
 
-    var currentMiniApp: MiniApp? = null
-        private set
+    private val _currentMiniApp = MutableStateFlow<MiniApp?>(null)
+    val currentMiniApp: StateFlow<MiniApp?> = _currentMiniApp.asStateFlow()
 
     /** Pending workbench request — shown as a confirmation card in chat. */
     data class WorkbenchRequest(
@@ -107,6 +117,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     init {
         // 启动时加载会话列表并恢复最近会话
         viewModelScope.launch {
+            sessionRegistry.load()
             val convs = withContext(Dispatchers.IO) { conversationStorage.loadAllConversations() }
             _conversations.value = convs
             val latest = convs.firstOrNull()
@@ -135,7 +146,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _agentSteps.value = emptyList()
         _pendingAttachments.value = emptyList()
         _pendingWorkbench.value = null
-        currentMiniApp = null
+        _currentMiniApp.value = null
     }
 
     /** 切换到历史会话 */
@@ -148,7 +159,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _agentSteps.value = emptyList()
         _pendingAttachments.value = emptyList()
         _pendingWorkbench.value = null
-        currentMiniApp = null
+        _currentMiniApp.value = null
         viewModelScope.launch {
             val msgs = withContext(Dispatchers.IO) { conversationStorage.loadMessages(conversationId) }
             _messages.value = msgs
@@ -159,6 +170,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteConversation(conversationId: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { conversationStorage.deleteConversation(conversationId) }
+            sessionRegistry.endSession(conversationId)
             _conversations.update { it.filter { c -> c.id != conversationId } }
             // 如果删除的是当前会话，新建一个空的
             if (conversationId == _activeConversationId.value) {
@@ -166,12 +178,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _activeConversationId.value = newId
                 _messages.value = emptyList()
                 _error.value = null
-                currentMiniApp = null
+                _currentMiniApp.value = null
             }
         }
     }
 
     /** 保存当前会话到磁盘 */
+    /** 退出前同步保存当前会话（Activity 即将 finish，不能用异步协程） */
+    fun saveBeforeExit() {
+        val convId = _activeConversationId.value ?: return
+        val msgs = _messages.value
+        if (msgs.isEmpty()) return
+        val title = generateTitle(msgs)
+        val conv = Conversation(
+            id = convId,
+            title = title,
+            createdAt = msgs.firstOrNull()?.timestamp ?: System.currentTimeMillis(),
+            updatedAt = msgs.lastOrNull()?.timestamp ?: System.currentTimeMillis()
+        )
+        // runBlocking 确保在 Activity.onDestroy 返回前磁盘写完
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            saveMutex.withLock {
+                conversationStorage.saveConversation(conv)
+                conversationStorage.saveMessages(convId, msgs)
+            }
+        }
+    }
+
     private fun saveCurrentConversation() {
         val convId = _activeConversationId.value ?: return
         val msgs = _messages.value
@@ -184,13 +217,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             updatedAt = msgs.lastOrNull()?.timestamp ?: System.currentTimeMillis()
         )
         viewModelScope.launch(Dispatchers.IO) {
-            conversationStorage.saveConversation(conv)
-            conversationStorage.saveMessages(convId, msgs)
-        }
-        // 更新内存中的会话列表
-        _conversations.update { list ->
-            val filtered = list.filter { it.id != convId }
-            listOf(conv) + filtered
+            saveMutex.withLock {
+                conversationStorage.saveConversation(conv)
+                conversationStorage.saveMessages(convId, msgs)
+            }
+            // 磁盘写入完成后再更新内存列表
+            _conversations.update { list ->
+                val filtered = list.filter { it.id != convId }
+                listOf(conv) + filtered
+            }
         }
     }
 
@@ -258,6 +293,38 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             _activeConversationId.value = UUID.randomUUID().toString()
         }
 
+        // Check if session is paused
+        val activeId = _activeConversationId.value!!
+        if (sessionRegistry.isPaused(activeId)) {
+            _error.value = "会话已暂停，请在会话管理中恢复后再发送"
+            return
+        }
+
+        // Lazy session registration: register on first message
+        if (_messages.value.none { it.role == "user" }) {
+            sessionRegistry.register(
+                ManagedSession(
+                    id = activeId,
+                    type = SessionType.CHAT,
+                    label = userInput.take(30).replace("\n", " ").trim().ifEmpty { "新对话" },
+                    source = SessionSource.USER_CREATED,
+                    skillId = _activeSkill.value.id,
+                    modelId = _activeModelId.value,
+                    messageCount = 1
+                )
+            )
+        } else {
+            // Update existing session
+            val existing = sessionRegistry.sessions.value.find { it.id == activeId }
+            if (existing != null) {
+                sessionRegistry.update(existing.copy(
+                    messageCount = _messages.value.size + 1,
+                    modelId = _activeModelId.value,
+                    skillId = _activeSkill.value.id
+                ))
+            }
+        }
+
         val attachments = _pendingAttachments.value.toList()
         _pendingAttachments.value = emptyList()
 
@@ -319,7 +386,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Pass latest app hint to ToolExecutor for auto-resolve
                 val lastApp = _messages.value.lastOrNull { it.miniApp != null }?.miniApp
-                toolExecutor.latestAppHint = lastApp?.id ?: currentMiniApp?.id
+                toolExecutor.latestAppHint = lastApp?.id ?: _currentMiniApp.value?.id
 
                 val syncStepCallback: (AgentStep) -> Unit = { step ->
                     synchronized(collectedSteps) {
@@ -372,7 +439,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     thinkingContent = result.thinkingContent
                 )
                 _messages.update { it + assistantMessage }
-                _agentSteps.value = emptyList()
 
                 // Detect if a new SSH session was created → offer SSH mode
                 val sessionsAfter = toolExecutor.sshManager.getActiveSessions()
@@ -398,7 +464,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setCurrentApp(app: MiniApp) {
-        currentMiniApp = app
+        _currentMiniApp.value = app
     }
 
     fun saveMiniApp(app: MiniApp) {
@@ -492,7 +558,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         // Currently running app
-        currentMiniApp?.let { app ->
+        _currentMiniApp.value?.let { app ->
             if (app.id != lastApp?.id) parts.add("运行中: ${app.name}|${app.id}")
         }
 

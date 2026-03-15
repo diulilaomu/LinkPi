@@ -9,5 +9,7 @@ data class MiniApp(
     /** If true, this app uses a workspace directory with multiple files instead of single htmlContent. */
     val isWorkspaceApp: Boolean = false,
     /** Entry file relative path within the workspace (e.g. "index.html"). */
-    val entryFile: String = "index.html"
+    val entryFile: String = "index.html",
+    /** Emoji icon for home screen shortcut. */
+    val icon: String = ""
 )

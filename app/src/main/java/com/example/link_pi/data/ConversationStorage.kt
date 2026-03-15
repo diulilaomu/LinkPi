@@ -38,7 +38,7 @@ class ConversationStorage(private val context: Context) {
             put("createdAt", conv.createdAt)
             put("updatedAt", conv.updatedAt)
         }
-        File(dir, "meta.json").writeText(json.toString())
+        atomicWrite(File(dir, "meta.json"), json.toString())
     }
 
     fun loadAllConversations(): List<Conversation> {
@@ -61,7 +61,18 @@ class ConversationStorage(private val context: Context) {
         for (msg in messages) {
             arr.put(messageToJson(msg))
         }
-        File(dir, "messages.json").writeText(arr.toString())
+        atomicWrite(File(dir, "messages.json"), arr.toString())
+    }
+
+    /** Write to temp file then rename — survives process kill mid-write. */
+    private fun atomicWrite(target: File, content: String) {
+        val tmp = File(target.parentFile, "${target.name}.tmp")
+        tmp.writeText(content)
+        if (!tmp.renameTo(target)) {
+            // renameTo may fail on some filesystems; fallback to copy + delete
+            tmp.copyTo(target, overwrite = true)
+            tmp.delete()
+        }
     }
 
     fun loadMessages(conversationId: String): List<ChatMessage> {

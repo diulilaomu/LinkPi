@@ -7,36 +7,39 @@ package com.example.link_pi.skill
 object BridgeDocs {
 
     private val STORAGE = """
-- NativeBridge.saveData(key, value) — 持久化保存数据（每个应用独立隔离）
-- NativeBridge.loadData(key) — 加载已保存的数据（返回字符串或空）
-- NativeBridge.removeData(key) — 删除已存储的键
-- NativeBridge.clearData() — 清除此应用的所有存储数据
-- NativeBridge.listKeys() — 返回所有已存储键的逗号分隔列表
-- NativeBridge.getAppId() — 返回当前应用的唯一 ID
+- saveData(key, value) — 持久化保存数据（每个应用独立隔离）。key/value 均为字符串，value 过大时建议 JSON.stringify 压缩
+- loadData(key) — 加载已保存的数据（返回字符串，不存在时返回空字符串 ""）
+- removeData(key) — 删除已存储的键
+- clearData() — 清除此应用的所有存储数据
+- listKeys() — 返回所有已存储键的数组
+- getAppId() — 返回当前应用的唯一 ID
 """.trimIndent()
 
     private val UI_FEEDBACK = """
-- NativeBridge.showToast(message) — 显示原生 Toast 通知
-- NativeBridge.vibrate(milliseconds) — 设备振动（最长 5000ms）
-- NativeBridge.writeClipboard(text) — 复制文本到剪贴板
-- NativeBridge.sendToApp(jsonString) — 向宿主应用发送数据
+- showToast(message) — 显示原生 Toast 通知
+- vibrate(milliseconds) — 设备振动（最长 5000ms）
+- writeClipboard(text) — 复制文本到剪贴板
+- sendToApp(jsonString) — 向宿主应用发送数据
 """.trimIndent()
 
     private val SENSOR = """
-- NativeBridge.getDeviceInfo() — 返回 JSON 字符串：{model, brand, manufacturer, sdkVersion, release}
-- NativeBridge.getBatteryLevel() — 返回电量百分比（0-100）
-- NativeBridge.getLocation() — 返回 JSON 字符串：{latitude, longitude, accuracy}，或空字符串
+- getDeviceInfo() — 返回 JSON 对象：{model, brand, manufacturer, sdkVersion, release}
+- getBatteryLevel() — 返回电量百分比（0-100）
+- getLocation() — 返回 JSON 对象：{latitude, longitude, accuracy}，定位失败时返回空字符串（需检查返回值）
 """.trimIndent()
 
     private val NETWORK = """
 - nativeFetch(url, options) — HTTP 请求（绕过 CORS）。返回类似 fetch API 的 Promise
   用法：nativeFetch('https://api.example.com/data', {method:'GET',headers:{},body:''}).then(r=>r.json()).then(data=>...)
   响应：{status, statusText, headers, body, ok, json(), text()}
-- callModule(moduleName, endpointName, params) — 调用动态 API 模块端点。返回 Promise
-  用法：callModule('weather', 'get_forecast', {city:'北京'}).then(r=>console.log(r))
-  params 为 JSON 对象，对应模块端点的 bodyTemplate 占位符 {{param}}
-- listModules() — 返回所有可用模块的数组（同步）。每个元素包含 name、description、endpoints
-  用法：const mods = listModules(); mods.forEach(m => console.log(m.name))
+  错误处理：网络失败时 Promise reject，务必用 .catch() 处理。超时约 30 秒
+- callModule(moduleName, path, options) — 调用运行中的 Python 服务模块。返回 Promise
+  用法：callModule('my_api', '/hello').then(r => console.log(r))
+  带请求体：callModule('my_api', '/process', {method:'POST', body:{data:'hello'}}).then(r => console.log(r))
+  options: {method?: 'GET'|'POST'|'PUT'|'DELETE', body?: object|string}
+  错误处理：模块未运行或不存在时 reject，先用 listModules() 确认可用性
+- listModules() — 返回所有模块及其运行状态的数组（同步）。每个元素包含 name、description、serviceType、running、port、scripts
+  用法：const mods = listModules(); mods.forEach(m => console.log(m.name, m.running))
 """.trimIndent()
 
     private val REALTIME = """
@@ -80,12 +83,12 @@ object BridgeDocs {
         if (groups.isEmpty()) return ""
         val apis = groups.mapNotNull { GROUP_MAP[it] }.joinToString("\n")
         return """
-### NativeBridge API（在生成的应用代码中通过 window.NativeBridge 使用）
+### NativeBridge API（在生成的应用代码中直接调用，无需前缀）
 
 $apis
 
 每个迷你应用都有独立的存储空间。一个应用保存的数据无法被另一个应用访问。
-使用前始终检查可用性：if (window.NativeBridge) { ... }
+所有 API 均已注册为全局函数，直接调用即可（如 saveData()、showToast()、nativeFetch()）。
 """.trimIndent()
     }
 }

@@ -5,9 +5,14 @@ import android.util.Log
 import com.example.link_pi.agent.AgentOrchestrator
 import com.example.link_pi.agent.AgentStep
 import com.example.link_pi.agent.AppInfoAgent
+import com.example.link_pi.agent.ArchitectureAnalyzer
 import com.example.link_pi.agent.OrchestratorResult
 import com.example.link_pi.agent.StepType
 import com.example.link_pi.agent.ToolExecutor
+import com.example.link_pi.data.SessionRegistry
+import com.example.link_pi.data.model.ManagedSession
+import com.example.link_pi.data.model.SessionSource
+import com.example.link_pi.data.model.SessionType
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppStorage
 import com.example.link_pi.network.AiConfig
@@ -64,6 +69,19 @@ class WorkbenchEngine(
         onUpdate: (WorkbenchTask) -> Unit = {}
     ): WorkbenchTask = withContext(Dispatchers.IO) {
         _stepsMap.update { it + (task.id to emptyList()) }
+
+        // Register WORKBENCH session
+        val sessionRegistry = SessionRegistry.getInstance(context)
+        sessionRegistry.register(
+            ManagedSession(
+                id = task.id,
+                type = SessionType.WORKBENCH,
+                label = task.title.ifBlank { task.userPrompt.take(30) },
+                source = SessionSource.FROM_WORKBENCH,
+                modelId = task.modelId,
+                metadata = mapOf("taskTitle" to task.title)
+            )
+        )
 
         // Configure AI with the task's model (per-task override, no global mutation)
         val aiConfig = AiConfig(context)
@@ -161,10 +179,15 @@ class WorkbenchEngine(
             onUpdate(current)
 
             // ── Silent check chain: AppInfoAgent reads code and generates metadata ──
+            // Pre-compute architecture profile once to avoid redundant file scanning
+            val archProfile = if (miniApp?.isWorkspaceApp == true) {
+                ArchitectureAnalyzer.analyze(toolExecutor.workspaceManager, actualAppId)
+            } else null
+
             val infoResult = if (miniApp?.isWorkspaceApp == true) {
                 withTimeoutOrNull(45_000L) {
                     val agent = AppInfoAgent(aiService, toolExecutor.workspaceManager)
-                    agent.run(actualAppId, task.userPrompt)
+                    agent.run(actualAppId, task.userPrompt, archProfile)
                 }
             } else null
 
@@ -218,6 +241,7 @@ class WorkbenchEngine(
             )
             taskStorage.save(current)
             onUpdate(current)
+            sessionRegistry.endSession(task.id)
             current
         } catch (e: Exception) {
             Log.e(TAG, "Task ${task.id} failed", e)
@@ -229,6 +253,7 @@ class WorkbenchEngine(
             )
             taskStorage.save(current)
             onUpdate(current)
+            sessionRegistry.endSession(task.id)
             current
         }
     }

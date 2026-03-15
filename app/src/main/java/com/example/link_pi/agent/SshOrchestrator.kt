@@ -1,7 +1,7 @@
 package com.example.link_pi.agent
 
 import com.example.link_pi.network.AiService
-import com.example.link_pi.skill.BuiltInSkills
+import com.example.link_pi.skill.PromptSsh
 
 /**
  * SSH 专用编排器 — 简化的 AI 循环:
@@ -51,7 +51,7 @@ class SshOrchestrator(
         enableThinking: Boolean = false
     ): SshResponse {
         val systemPrompt = buildString {
-            appendLine(BuiltInSkills.SSH_MODE_SYSTEM_PROMPT)
+            appendLine(PromptSsh.sshModeSystem())
             appendLine()
             appendLine("### 当前服务器信息")
             appendLine(serverContext)
@@ -119,7 +119,7 @@ class SshOrchestrator(
         enableThinking: Boolean = false
     ): String {
         val systemPrompt = buildString {
-            appendLine(BuiltInSkills.SSH_MODE_SYSTEM_PROMPT)
+            appendLine(PromptSsh.sshModeSystem())
             appendLine()
             appendLine("### 当前服务器信息")
             appendLine(serverContext)

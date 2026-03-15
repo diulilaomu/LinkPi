@@ -4,11 +4,11 @@ import com.example.link_pi.agent.ToolDef
 import com.example.link_pi.data.model.Skill
 
 /**
- * 系统提示组装器——三维注入矩阵：Skill × Intent × Phase。
+ * 系统提示组装器 — Gateway + 五大域架构。
  *
- * 所有模板文本集中在 [BuiltInSkills] 中，本类只负责组装逻辑。
- * - Planning: AI 看到能力目录 + 规划工具 → 输出规划 + 选择
- * - Generation: AI 看到选定工具/文档 → 生成代码
+ * [buildMessages] 返回多条 system message 列表（Gateway + 域指令 + 工具 + 动态上下文），
+ * 支持 Phase 切换时只替换部分消息，减少冗余。
+ * - [buildMessages]：新接口，返回多条 system message 列表（Gateway + 域指令 + 工具 + 动态上下文）
  */
 object PromptAssembler {
 
@@ -24,104 +24,144 @@ object PromptAssembler {
     }
 
     /**
-     * 组装系统提示。
+     * 传递给 [buildMessages] 的动态上下文。
      */
-    fun build(
+    data class DomainContext(
+        val memorySnapshot: String? = null,
+        val workspaceSnapshot: String? = null,
+        val aiSelection: CapabilitySelection? = null,
+        val injectedPrompts: List<String> = emptyList()
+    )
+
+    // ═══════════════════════════════════════════════════════
+    //  新接口：多条 system message
+    // ═══════════════════════════════════════════════════════
+
+    /**
+     * 构建多条 system message 列表（新架构）。
+     *
+     * 返回结构：
+     * - messages[0] = Gateway（角色 + 通用规则 + 记忆）— 固定层
+     * - messages[1] = 域指令（按 intent × phase 选择的工作流文本）
+     * - messages[2] = 动态上下文（BridgeDocs + CdnDocs + workspaceSnapshot）
+     *
+     * 工具列表不再嵌入系统提示，而是通过 [resolveTools] 作为 API tools 参数传递。
+     * 空内容的消息会被省略。
+     */
+    fun buildMessages(
         skill: Skill,
         intent: UserIntent,
-        phase: AgentPhase,
+        phase: PromptDomain.Phase,
         allTools: List<ToolDef>,
-        memorySnapshot: String?,
-        aiSelection: CapabilitySelection? = null,
-        workspaceSnapshot: String? = null,
-        injectedPrompts: List<String> = emptyList(),
-        fast: Boolean = false
-    ): String {
-        // For app GENERATION phase, merge AI selections with base groups
-        val groups = if (phase == AgentPhase.GENERATION && intent.needsApp() && aiSelection != null && !aiSelection.isEmpty()) {
+        context: DomainContext
+    ): List<Map<String, String>> {
+
+        // [0] Gateway — 固定层（不再包含工具调用格式说明）
+        val gateway = PromptGateway.build(
+            skillPrompt = skill.systemPrompt,
+            memorySnapshot = context.memorySnapshot,
+            injectedPrompts = context.injectedPrompts
+        )
+
+        // [1] 域指令
+        val domainText = resolveDomainText(intent, phase)
+
+        // [2] 动态上下文
+        val dynamicText = buildDynamicContext(intent, phase, skill, context)
+
+        // 组装 — 忽略空消息
+        return buildList {
+            add(mapOf("role" to "system", "content" to gateway))
+            if (domainText.isNotBlank()) {
+                add(mapOf("role" to "system", "content" to domainText))
+            }
+            if (dynamicText.isNotBlank()) {
+                add(mapOf("role" to "system", "content" to dynamicText))
+            }
+        }
+    }
+
+    /**
+     * 解析当前上下文应该传递给 API 的工具列表（Function Calling）。
+     * 替代原来嵌入系统提示的文本工具列表。
+     */
+    fun resolveTools(
+        skill: Skill,
+        intent: UserIntent,
+        phase: PromptDomain.Phase,
+        allTools: List<ToolDef>,
+        aiSelection: CapabilitySelection? = null
+    ): List<ToolDef> {
+        val agentPhase = phase.toAgentPhase()
+        val groups = if (agentPhase == AgentPhase.GENERATION && intent.needsApp() && aiSelection != null && !aiSelection.isEmpty()) {
             val base = mutableSetOf(ToolGroup.CORE, ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING)
             base.addAll(aiSelection.toolGroups)
             base.addAll(skill.extraToolGroups)
             base
         } else {
-            resolveToolGroups(intent, phase, skill.extraToolGroups)
+            resolveToolGroups(intent, agentPhase, skill.extraToolGroups)
         }
 
-        // In FAST generation mode, AI outputs structured file blocks directly — no file tools needed
-        val tools = if (fast && phase == AgentPhase.GENERATION) {
-            emptyList()
-        } else {
-            allTools.filter { val g = TOOL_GROUP_MAP[it.name]; g == null || g in groups }
-        }
-        val toolDescriptions = tools.joinToString("\n") { it.toPromptString() }
+        return allTools
+            .filter { val g = TOOL_GROUP_MAP[it.name]; g == null || g in groups }
+            .let { list -> if (intent.needsApp()) list.filter { it.name != "launch_workbench" } else list }
+    }
 
-        // Bridge/CDN docs: for generation, use AI selections merged with skill defaults
-        val effectiveBridgeGroups = if (aiSelection != null && !aiSelection.isEmpty()) skill.bridgeGroups + aiSelection.bridgeGroups else skill.bridgeGroups
-        val effectiveCdnGroups = if (aiSelection != null && !aiSelection.isEmpty()) skill.cdnGroups + aiSelection.cdnGroups else skill.cdnGroups
+    /** 按 intent × phase 选择域指令文本 */
+    private fun resolveDomainText(intent: UserIntent, phase: PromptDomain.Phase): String = when {
+        // CREATE_APP
+        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.PLANNING ->
+            PromptCreate.CAPABILITY_CATALOG + "\n\n" + PromptCreate.planning()
+        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.GENERATION ->
+            PromptCreate.generation()
+        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.SELF_CHECK ->
+            PromptCreate.selfCheck()
+        // MODIFY_APP
+        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.PLANNING ->
+            PromptCreate.CAPABILITY_CATALOG + "\n\n" + PromptModify.planning()
+        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.GENERATION ->
+            PromptModify.generation()
+        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.SELF_CHECK ->
+            PromptModify.selfCheck()
+        // MODULE
+        intent == UserIntent.MODULE_MGMT -> PromptModule.workflow()
+        // CONVERSATION / MEMORY_OPS — 无专属工作流
+        else -> ""
+    }
 
-        // App generation phase needs Bridge/CDN docs (CREATE for full build, MODIFY when adding new features)
-        val needFullDocs = intent.needsApp() && phase != AgentPhase.PLANNING
-        val bridgeDocs = if (needFullDocs)
-            BridgeDocs.build(effectiveBridgeGroups) else ""
-        val cdnDocs = if (needFullDocs)
-            CdnDocs.build(effectiveCdnGroups) else ""
+    /** 构建动态上下文消息（BridgeDocs + CdnDocs + workspaceSnapshot） */
+    private fun buildDynamicContext(
+        intent: UserIntent,
+        phase: PromptDomain.Phase,
+        skill: Skill,
+        context: DomainContext
+    ): String {
+        val needFullDocs = intent.needsApp() && phase != PromptDomain.Phase.PLANNING
+        val effectiveBridgeGroups = if (context.aiSelection != null && !context.aiSelection.isEmpty())
+            skill.bridgeGroups + context.aiSelection.bridgeGroups else skill.bridgeGroups
+        val effectiveCdnGroups = if (context.aiSelection != null && !context.aiSelection.isEmpty())
+            skill.cdnGroups + context.aiSelection.cdnGroups else skill.cdnGroups
 
-        val workflow = BuiltInSkills.resolveWorkflow(intent, phase, fast)
+        val bridgeDocs = if (needFullDocs) BridgeDocs.build(effectiveBridgeGroups) else ""
+        val cdnDocs = if (needFullDocs) CdnDocs.build(effectiveCdnGroups) else ""
 
         return buildString {
-            appendLine(skill.systemPrompt)
-            if (injectedPrompts.isNotEmpty()) {
-                appendLine()
-                appendLine("### 注入的辅助 Skill 指令")
-                injectedPrompts.forEach { prompt ->
-                    appendLine(prompt)
-                    appendLine()
-                }
-            }
-            // FAST generation: skip agent mode header + tool list (AI uses structured file output, not tool calls)
-            if (!(fast && phase == AgentPhase.GENERATION)) {
-                appendLine()
-                appendLine(BuiltInSkills.AGENT_MODE_HEADER)
-                appendLine()
-                appendLine("### 可用工具")
-                appendLine(toolDescriptions)
-            }
-
-            if (intent == UserIntent.CREATE_APP && phase == AgentPhase.PLANNING) {
-                appendLine()
-                appendLine(BuiltInSkills.CAPABILITY_CATALOG)
-            }
-
-            appendLine()
-            appendLine("---")
-            if (workflow.isNotBlank()) {
-                appendLine()
-                appendLine(workflow)
-            }
-            appendLine()
-            appendLine("### 规则")
-            appendLine(BuiltInSkills.RULE_BASE)
-            if (intent.needsApp() && phase == AgentPhase.PLANNING) {
-                appendLine(BuiltInSkills.RULES_PLANNING_APP)
-            } else if (intent.needsApp() && phase != AgentPhase.PLANNING) {
-                appendLine(BuiltInSkills.RULES_GENERATION_APP)
-            }
-            if (bridgeDocs.isNotBlank()) {
-                appendLine()
-                appendLine(bridgeDocs)
-            }
-            if (cdnDocs.isNotBlank()) {
-                appendLine()
-                appendLine(cdnDocs)
-            }
-            if (!workspaceSnapshot.isNullOrBlank()) {
-                appendLine()
-                appendLine(workspaceSnapshot)
-            }
-            appendLine()
-            appendLine(BuiltInSkills.buildMemorySection(memorySnapshot, skill.mode))
+            if (bridgeDocs.isNotBlank()) appendLine(bridgeDocs)
+            if (cdnDocs.isNotBlank()) appendLine(cdnDocs)
+            if (!context.workspaceSnapshot.isNullOrBlank()) appendLine(context.workspaceSnapshot)
         }.trimEnd()
     }
+
+    /** PromptDomain.Phase → AgentPhase 映射 */
+    private fun PromptDomain.Phase.toAgentPhase(): AgentPhase = when (this) {
+        PromptDomain.Phase.PLANNING -> AgentPhase.PLANNING
+        PromptDomain.Phase.GENERATION -> AgentPhase.GENERATION
+        PromptDomain.Phase.SELF_CHECK -> AgentPhase.REFINEMENT
+    }
+
+    // ═══════════════════════════════════════════════════════
+    //  解析工具
+    // ═══════════════════════════════════════════════════════
 
     /**
      * Parse the AI's capability selection from its planning response.
@@ -170,5 +210,17 @@ object PromptAssembler {
             "FAST" -> GenerationMode.FAST
             else -> GenerationMode.FULL
         }
+    }
+
+    /**
+     * Extract `<architecture>...</architecture>` block from planning response.
+     * This block contains the AI's structured architecture plan for the project.
+     * Returns the raw text content of the block, or null if not found.
+     */
+    fun parseArchitectureBlueprint(planningResponse: String): String? {
+        val regex = Regex("""<architecture>\s*([\s\S]*?)\s*</architecture>""")
+        val match = regex.find(planningResponse) ?: return null
+        val content = match.groupValues[1].trim()
+        return if (content.isNotBlank()) content else null
     }
 }

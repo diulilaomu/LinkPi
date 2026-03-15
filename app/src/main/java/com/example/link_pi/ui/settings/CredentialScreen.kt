@@ -367,14 +367,6 @@ private fun CredentialEditDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
-                    value = service,
-                    onValueChange = { service = it },
-                    label = { Text("服务地址") },
-                    placeholder = { Text("例如: https://api.github.com") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
                     value = username,
                     onValueChange = { username = it },
                     label = { Text("用户名 / 账号") },

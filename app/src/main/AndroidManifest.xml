@@ -27,6 +27,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:label="@string/app_name"
             android:windowSoftInputMode="adjustNothing"
             android:theme="@style/Theme.Linkpi">
@@ -49,6 +50,11 @@
 
         <service
             android:name=".workbench.GenerationService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
+        <service
+            android:name=".ui.ssh.KeepAliveService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
     </application>

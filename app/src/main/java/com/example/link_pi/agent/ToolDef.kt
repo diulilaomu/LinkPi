@@ -1,5 +1,6 @@
 package com.example.link_pi.agent
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -17,6 +18,57 @@ data class ToolDef(
         }
         return "- $name($params): $description"
     }
+
+    /** 精简版：签名 + 一句话说明，省略参数描述，减少 token 占用 */
+    fun toCompactPromptString(): String {
+        val params = parameters.joinToString(", ") { p ->
+            val opt = if (!p.required) "?" else ""
+            "${p.name}$opt"
+        }
+        return "- $name($params): $description"
+    }
+
+    /** 转换为 OpenAI function calling 的 tools[] 元素格式 */
+    fun toFunctionSchema(): JSONObject {
+        val properties = JSONObject()
+        val required = JSONArray()
+        for (p in parameters) {
+            properties.put(p.name, JSONObject().apply {
+                put("type", p.type.toJsonSchemaType())
+                put("description", p.description)
+            })
+            if (p.required) required.put(p.name)
+        }
+        return JSONObject().apply {
+            put("type", "function")
+            put("function", JSONObject().apply {
+                put("name", name)
+                put("description", description)
+                put("parameters", JSONObject().apply {
+                    put("type", "object")
+                    put("properties", properties)
+                    if (required.length() > 0) put("required", required)
+                })
+            })
+        }
+    }
+
+    companion object {
+        /** 将 ToolDef 列表转换为 API 请求的 tools JSONArray */
+        fun toToolsArray(tools: List<ToolDef>): JSONArray {
+            val arr = JSONArray()
+            for (t in tools) arr.put(t.toFunctionSchema())
+            return arr
+        }
+    }
+}
+
+private fun String.toJsonSchemaType(): String = when (this) {
+    "number" -> "number"
+    "boolean" -> "boolean"
+    "array" -> "array"
+    "integer" -> "integer"
+    else -> "string"
 }
 
 data class ToolParam(
@@ -31,90 +83,33 @@ data class ToolParam(
  */
 data class ToolCall(
     val toolName: String,
-    val arguments: Map<String, String>
+    val arguments: Map<String, String>,
+    /** Function calling tool_call_id（用于将结果关联回请求） */
+    val id: String? = null
 ) {
     companion object {
         /**
-         * Parse all <tool_call> blocks from the AI response text.
+         * Parse tool_calls from OpenAI function calling API response.
          */
-        fun parseAll(text: String): List<ToolCall> {
-            val regex = Regex("<tool_call>\\s*([\\s\\S]*?)\\s*</tool_call>")
-            return regex.findAll(text).mapNotNull { match ->
+        fun fromApiToolCalls(toolCallsArray: JSONArray): List<ToolCall> {
+            return (0 until toolCallsArray.length()).mapNotNull { i ->
                 try {
-                    val raw = match.groupValues[1].trim()
-                    val jsonStr = sanitizeJsonNewlines(raw)
-                    val json = JSONObject(jsonStr)
-                    val name = json.getString("tool")
+                    val tc = toolCallsArray.getJSONObject(i)
+                    val id = tc.getString("id")
+                    val func = tc.getJSONObject("function")
+                    val name = func.getString("name")
+                    val argsStr = func.optString("arguments", "{}")
+                    val argsJson = JSONObject(argsStr)
                     val args = mutableMapOf<String, String>()
-                    val argsJson = json.optJSONObject("args")
-                    if (argsJson != null) {
-                        for (key in argsJson.keys()) {
-                            // Use opt to handle non-string values gracefully
-                            args[key] = argsJson.optString(key, "")
-                        }
+                    for (key in argsJson.keys()) {
+                        args[key] = argsJson.optString(key, "")
                     }
-                    ToolCall(name, args)
-                } catch (_: Exception) {
-                    null
-                }
-            }.toList()
-        }
-
-        /**
-         * Check if text contains a truncated (unclosed) tool_call block.
-         */
-        fun hasTruncatedToolCall(text: String): Boolean {
-            val openCount = Regex("<tool_call>").findAll(text).count()
-            val closeCount = Regex("</tool_call>").findAll(text).count()
-            return openCount > closeCount
-        }
-
-        /**
-         * Strip tool_call blocks from text to get the display portion.
-         * Also strips truncated (unclosed) tool_call blocks.
-         */
-        fun stripToolCalls(text: String): String {
-            return text
-                .replace(Regex("<tool_call>[\\s\\S]*?</tool_call>"), "")
-                .replace(Regex("<tool_call>[\\s\\S]*$"), "") // truncated block
-                .trim()
-        }
-
-        /**
-         * Fix literal newlines/tabs inside JSON string values.
-         * AI sometimes outputs raw newlines in JSON strings instead of \\n escapes.
-         */
-        private fun sanitizeJsonNewlines(raw: String): String {
-            val sb = StringBuilder()
-            var inString = false
-            var escaped = false
-            for (ch in raw) {
-                if (escaped) {
-                    sb.append(ch)
-                    escaped = false
-                    continue
-                }
-                if (ch == '\\') {
-                    escaped = true
-                    sb.append(ch)
-                    continue
-                }
-                if (ch == '"') {
-                    inString = !inString
-                    sb.append(ch)
-                    continue
-                }
-                if (inString) {
-                    when (ch) {
-                        '\n' -> { sb.append("\\n"); continue }
-                        '\r' -> continue
-                        '\t' -> { sb.append("\\t"); continue }
-                    }
-                }
-                sb.append(ch)
+                    ToolCall(name, args, id)
+                } catch (_: Exception) { null }
             }
-            return sb.toString()
         }
+
+
     }
 }
 

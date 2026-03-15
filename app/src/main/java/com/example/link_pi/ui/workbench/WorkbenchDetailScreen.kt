@@ -56,7 +56,7 @@ import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
-import androidx.compose.material.icons.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Lightbulb
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Button
@@ -105,8 +105,12 @@ import com.example.link_pi.agent.StepType
 import com.example.link_pi.network.ModelConfig
 import com.example.link_pi.ui.common.RichInputBar
 import com.example.link_pi.ui.common.RichInputBarStyle
+import com.example.link_pi.workbench.PlanStep
+import com.example.link_pi.workbench.PlanStepStatus
 import com.example.link_pi.workbench.TaskStatus
+import com.example.link_pi.workbench.WorkbenchMessage
 import com.example.link_pi.workbench.WorkbenchTask
+import com.example.link_pi.workbench.derivePlanSteps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -121,6 +125,7 @@ fun WorkbenchDetailScreen(
     taskId: String,
     onBack: () -> Unit,
     onRunApp: (String) -> Unit,
+    onReloadApp: (String) -> Unit = {},
     onRetry: (String) -> Unit,
     onExport: (String) -> Unit = {}
 ) {
@@ -258,13 +263,13 @@ fun WorkbenchDetailScreen(
             modifier = Modifier.fillMaxSize()
         ) { page ->
             when (page) {
-                0 -> RunTabContent(task, onRunApp, onRetry, onExport)
-                1 -> WorkspaceTabContent(
-                    files = files,
-                    engineSteps = engineSteps,
-                    isActiveTask = isActiveTask,
+                0 -> RunTabContent(
                     task = task,
-                    viewModel = viewModel,
+                    files = files,
+                    onRunApp = onRunApp,
+                    onReloadApp = onReloadApp,
+                    onRetry = onRetry,
+                    onExport = onExport,
                     onFileClick = { path -> openFilePath = path },
                     onPickFile = {
                         filePickerLauncher.launch(arrayOf(
@@ -273,6 +278,18 @@ fun WorkbenchDetailScreen(
                         ))
                     },
                     onCreateFile = { showCreateFileDialog = true }
+                )
+                1 -> WorkspaceTabContent(
+                    engineSteps = engineSteps,
+                    isActiveTask = isActiveTask,
+                    task = task,
+                    viewModel = viewModel,
+                    onPickFile = {
+                        filePickerLauncher.launch(arrayOf(
+                            "text/*", "application/json", "application/javascript",
+                            "application/xml", "application/xhtml+xml"
+                        ))
+                    }
                 )
                 2 -> RequirementTabContent(task)
             }
@@ -332,29 +349,22 @@ private fun StatusLabel(task: WorkbenchTask, actualFileCount: Int) {
     Text(statusText, style = MaterialTheme.typography.labelSmall, color = color)
 }
 
-// ━━━━━━━━━━━━━ Tab 1: 工作台 ━━━━━━━━━━━━━
+// ━━━━━━━━━━━━━ Tab 1: 工作台 (Message Center) ━━━━━━━━━━━━━
 @Composable
 private fun WorkspaceTabContent(
-    files: List<String>,
     engineSteps: List<AgentStep>,
     isActiveTask: Boolean,
     task: WorkbenchTask,
     viewModel: WorkbenchViewModel,
-    onFileClick: (String) -> Unit = {},
-    onPickFile: () -> Unit = {},
-    onCreateFile: () -> Unit = {}
+    onPickFile: () -> Unit = {}
 ) {
     val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
-    val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
     val navBarBottomDp = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
-    val inputBarHeight = 64.dp
-    val listBottomPadding = if (imeBottomDp > navBarBottomDp) 0.dp else inputBarHeight + 16.dp
 
     var inputText by remember { mutableStateOf("") }
     var justSent by remember { mutableStateOf(false) }
     var showModelMenu by remember { mutableStateOf(false) }
-    var messagesExpanded by remember { mutableStateOf(false) }
 
     val isBusy = justSent || task.status in listOf(
         TaskStatus.QUEUED, TaskStatus.PLANNING, TaskStatus.GENERATING, TaskStatus.CHECKING
@@ -365,210 +375,493 @@ private fun WorkspaceTabContent(
         }
     }
 
-    // Refresh model list whenever this screen is (re)entered
     LaunchedEffect(Unit) { viewModel.refreshModels() }
-
     val models by viewModel.models.collectAsState()
     val activeModelId by viewModel.activeModelId.collectAsState()
     val deepThinking by viewModel.deepThinking.collectAsState()
-    val activeModel = models.find { it.id == activeModelId }
 
-    // Auto-expand message bar when new steps arrive, auto-collapse when idle
-    val stepCount = engineSteps.size
-    LaunchedEffect(stepCount) {
-        if (stepCount > 0 && isActiveTask) messagesExpanded = true
+    // Derive plan steps and messages from agent steps
+    val planSteps = remember(engineSteps.size, task.status) {
+        derivePlanSteps(engineSteps, task.status)
+    }
+    val workbenchMessages = remember(engineSteps.size) {
+        WorkbenchMessage.fromSteps(engineSteps)
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // ── Scrollable content ──
+    val msgListState = rememberLazyListState()
+    // Auto-scroll to bottom when new messages arrive
+    LaunchedEffect(workbenchMessages.size) {
+        if (workbenchMessages.isNotEmpty()) {
+            msgListState.animateScrollToItem(workbenchMessages.size - 1)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(bottom = navBarBottomDp)
+    ) {
+        // ── Plan pipeline card ──
+        if (engineSteps.isNotEmpty()) {
+            PlanPipelineCard(
+                steps = planSteps,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+            )
+        }
+
+        // ── Message list ──
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 16.dp, bottom = listBottomPadding),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            state = msgListState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (files.isNotEmpty()) {
-                item { FileTreeSection(files, onFileClick, onCreateFile) }
-            }
-            if (files.isEmpty() && engineSteps.isEmpty()) {
+            if (workbenchMessages.isEmpty()) {
                 item {
-                    Box(modifier = Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                        contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text("暂无文件", style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            OutlinedButton(onClick = onCreateFile) {
-                                Icon(Icons.Filled.Add, contentDescription = null,
-                                    modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("新建文件")
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            OutlinedButton(onClick = onPickFile) {
-                                Icon(Icons.Outlined.AttachFile, contentDescription = null,
-                                    modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("导入文件")
-                            }
-                        }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            if (isBusy) "等待 AI 开始工作..." else "暂无消息",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
                     }
+                }
+            }
+            items(workbenchMessages, key = { it.id }) { msg ->
+                when (msg) {
+                    is WorkbenchMessage.Thinking -> ThinkingMessageBlock(msg)
+                    is WorkbenchMessage.ToolCall -> ToolCallMessageBlock(msg)
+                    is WorkbenchMessage.ToolResult -> ToolResultMessageBlock(msg)
+                    is WorkbenchMessage.CodeChange -> CodeChangeMessageBlock(msg)
+                    is WorkbenchMessage.Status -> StatusMessageBlock(msg)
                 }
             }
         }
 
-        // ── Bottom panel: message bar + input bar ──
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .imePadding()
-                .padding(
-                    start = 12.dp,
-                    end = 12.dp,
-                    bottom = 8.dp + navBarBottomDp
-                )
-        ) {
-            // ── Collapsible message bar ──
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp),
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                shadowElevation = 2.dp
-            ) {
-                Column {
-                    // Header: tap to toggle
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(enabled = engineSteps.isNotEmpty()) {
-                                messagesExpanded = !messagesExpanded
-                            }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val statusText: String
-                        val dotColor: androidx.compose.ui.graphics.Color
-                        if (engineSteps.isNotEmpty()) {
-                            val latest = engineSteps.last()
-                            statusText = latest.description.take(40)
-                            dotColor = when (latest.type) {
-                                StepType.THINKING -> MaterialTheme.colorScheme.tertiary
-                                StepType.TOOL_CALL -> MaterialTheme.colorScheme.primary
-                                StepType.TOOL_RESULT -> if (latest.description.startsWith("✓"))
-                                    MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
-                                StepType.FINAL_RESPONSE -> MaterialTheme.colorScheme.primary
-                            }
-                        } else {
-                            statusText = when (task.status) {
-                                TaskStatus.COMPLETED -> "已完成"
-                                TaskStatus.FAILED -> "执行失败"
-                                TaskStatus.QUEUED -> "排队中"
-                                TaskStatus.PLANNING, TaskStatus.GENERATING,
-                                TaskStatus.CHECKING -> if (task.title.startsWith("修改")) "修改中…" else "处理中…"
-                            }
-                            dotColor = when (task.status) {
-                                TaskStatus.COMPLETED -> MaterialTheme.colorScheme.primary
-                                TaskStatus.FAILED -> MaterialTheme.colorScheme.error
-                                else -> MaterialTheme.colorScheme.outline
-                            }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(6.dp)
-                                .clip(CircleShape)
-                                .background(dotColor)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (engineSteps.isNotEmpty()) {
-                            Text(
-                                text = "${engineSteps.size} 步",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                            val expandRotation by animateFloatAsState(
-                                targetValue = if (messagesExpanded) 180f else 0f,
-                                label = "expand"
-                            )
-                            Icon(
-                                Icons.Outlined.KeyboardArrowDown,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .size(16.dp)
-                                    .rotate(expandRotation),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            )
-                        }
-                    }
+        // ── Input bar (inline, not floating) ──
+        RichInputBar(
+            text = inputText,
+            onTextChange = { inputText = it },
+            onSend = {
+                val prompt = inputText.trim()
+                inputText = ""
+                justSent = true
+                viewModel.modifyApp(task.id, prompt)
+            },
+            enabled = !isBusy,
+            placeholder = "描述你想要的修改...",
+            disabledPlaceholder = "正在生成中…",
+            models = models,
+            activeModelId = activeModelId.orEmpty(),
+            onSwitchModel = {
+                viewModel.switchModel(it)
+                showModelMenu = false
+            },
+            showModelMenu = showModelMenu,
+            onToggleModelMenu = { showModelMenu = !showModelMenu },
+            deepThinking = deepThinking,
+            onToggleThinking = { viewModel.toggleDeepThinking() },
+            onPickFile = onPickFile,
+            showAttachButton = true,
+            style = RichInputBarStyle.Material,
+            modifier = Modifier,
+            shadowElevation = 6.dp,
+        )
+    }
+}
 
-                    // Expanded step list
-                    AnimatedVisibility(
-                        visible = messagesExpanded && engineSteps.isNotEmpty(),
-                        enter = expandVertically(),
-                        exit = shrinkVertically()
-                    ) {
-                        val msgListState = rememberLazyListState()
-                        LaunchedEffect(engineSteps.size) {
-                            if (engineSteps.isNotEmpty()) {
-                                msgListState.animateScrollToItem(engineSteps.size - 1)
-                            }
-                        }
-                        LazyColumn(
-                            state = msgListState,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 200.dp)
-                                .padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp)
-                        ) {
-                            items(engineSteps) { step ->
-                                StepItem(step)
-                            }
-                        }
-                    }
+// ━━━━━━━━━━━━━ Plan Pipeline Card ━━━━━━━━━━━━━
+@Composable
+private fun PlanPipelineCard(steps: List<PlanStep>, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shadowElevation = 1.dp
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            steps.forEachIndexed { index, step ->
+                PlanStepChip(step)
+                if (index < steps.size - 1) {
+                    // Connector line
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(2.dp)
+                            .padding(horizontal = 2.dp)
+                            .background(
+                                when (step.status) {
+                                    PlanStepStatus.COMPLETED -> MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                    PlanStepStatus.ACTIVE -> MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                    PlanStepStatus.PENDING -> MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                                },
+                                RoundedCornerShape(1.dp)
+                            )
+                    )
                 }
             }
+        }
+    }
+}
 
-            // ── Input bar ──
-            RichInputBar(
-                text = inputText,
-                onTextChange = { inputText = it },
-                onSend = {
-                    val prompt = inputText.trim()
-                    inputText = ""
-                    justSent = true
-                    viewModel.modifyApp(task.id, prompt)
-                },
-                enabled = !isBusy,
-                placeholder = "描述你想要的修改...",
-                disabledPlaceholder = "正在生成中…",
-                models = models,
-                activeModelId = activeModelId.orEmpty(),
-                onSwitchModel = {
-                    viewModel.switchModel(it)
-                    showModelMenu = false
-                },
-                showModelMenu = showModelMenu,
-                onToggleModelMenu = { showModelMenu = !showModelMenu },
-                deepThinking = deepThinking,
-                onToggleThinking = { viewModel.toggleDeepThinking() },
-                onPickFile = onPickFile,
-                showAttachButton = true,
-                style = RichInputBarStyle.Material,
-                modifier = Modifier,
-                shadowElevation = 6.dp,
+@Composable
+private fun PlanStepChip(step: PlanStep) {
+    val (bgColor, textColor, dotColor) = when (step.status) {
+        PlanStepStatus.COMPLETED -> Triple(
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+            MaterialTheme.colorScheme.primary,
+            MaterialTheme.colorScheme.primary
+        )
+        PlanStepStatus.ACTIVE -> Triple(
+            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f),
+            MaterialTheme.colorScheme.tertiary,
+            MaterialTheme.colorScheme.tertiary
+        )
+        PlanStepStatus.PENDING -> Triple(
+            Color.Transparent,
+            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+            MaterialTheme.colorScheme.outlineVariant
+        )
+    }
+
+    Row(
+        modifier = Modifier
+            .background(bgColor, RoundedCornerShape(16.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (step.status == PlanStepStatus.COMPLETED) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                modifier = Modifier.size(10.dp),
+                tint = dotColor
             )
-        }   // end Column (bottom panel)
-    }       // end Box
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(dotColor)
+            )
+        }
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            step.label,
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+            color = textColor,
+            fontWeight = if (step.status == PlanStepStatus.ACTIVE) FontWeight.SemiBold else FontWeight.Normal
+        )
+    }
+}
+
+// ━━━━━━━━━━━━━ Workbench Message Blocks ━━━━━━━━━━━━━
+@Composable
+private fun ThinkingMessageBlock(msg: WorkbenchMessage.Thinking) {
+    var expanded by remember { mutableStateOf(false) }
+    val accentColor = MaterialTheme.colorScheme.tertiary
+
+    Surface(
+        onClick = { expanded = !expanded },
+        shape = RoundedCornerShape(10.dp),
+        color = accentColor.copy(alpha = 0.06f)
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.Lightbulb,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = accentColor
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = msg.summary,
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                    color = accentColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text(
+                    text = if (expanded) "收起 ▲" else "${msg.content.lines().size} 行 ▼",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = accentColor.copy(alpha = 0.5f)
+                )
+            }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(),
+                exit = shrinkVertically()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceContainerLow,
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(10.dp)
+                ) {
+                    Text(
+                        text = msg.content,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                            lineHeight = 16.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolCallMessageBlock(msg: WorkbenchMessage.ToolCall) {
+    var expanded by remember { mutableStateOf(false) }
+    val hasArgs = msg.args.isNotBlank()
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
+        modifier = if (hasArgs) Modifier.clickable { expanded = !expanded } else Modifier
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🔧", style = MaterialTheme.typography.labelSmall)
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = msg.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = if (expanded) Int.MAX_VALUE else 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (hasArgs) {
+                    Icon(
+                        if (expanded) Icons.Outlined.KeyboardArrowDown
+                        else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    )
+                }
+            }
+            if (expanded && hasArgs) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = msg.args.take(500),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolResultMessageBlock(msg: WorkbenchMessage.ToolResult) {
+    var expanded by remember { mutableStateOf(false) }
+    val hasDetail = msg.detail.isNotBlank()
+
+    val (bgColor, iconText) = if (msg.success) {
+        MaterialTheme.colorScheme.primary.copy(alpha = 0.06f) to "✓"
+    } else {
+        MaterialTheme.colorScheme.error.copy(alpha = 0.06f) to "✗"
+    }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = bgColor,
+        modifier = if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = iconText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (msg.success) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.error
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = msg.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = if (expanded) Int.MAX_VALUE else 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (hasDetail) {
+                    Icon(
+                        if (expanded) Icons.Outlined.KeyboardArrowDown
+                        else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    )
+                }
+            }
+            if (expanded && hasDetail) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = msg.detail.take(1000),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp,
+                        lineHeight = 14.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CodeChangeMessageBlock(msg: WorkbenchMessage.CodeChange) {
+    var expanded by remember { mutableStateOf(false) }
+    val hasDetail = msg.detail.isNotBlank()
+
+    val (opColor, opIcon) = when (msg.operation) {
+        "创建" -> MaterialTheme.colorScheme.primary to "+"
+        "写入" -> MaterialTheme.colorScheme.tertiary to "✎"
+        "删除" -> MaterialTheme.colorScheme.error to "−"
+        else -> MaterialTheme.colorScheme.secondary to "△"
+    }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = opColor.copy(alpha = 0.06f),
+        modifier = if (hasDetail) Modifier.clickable { expanded = !expanded } else Modifier
+    ) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Operation badge
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = opColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = opIcon,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold, fontSize = 11.sp
+                        ),
+                        color = opColor,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = msg.filePath,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = msg.operation,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                    color = opColor.copy(alpha = 0.7f)
+                )
+                if (hasDetail) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        if (expanded) Icons.Outlined.KeyboardArrowDown
+                        else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    )
+                }
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(),
+                exit = shrinkVertically()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceContainerLow,
+                            RoundedCornerShape(6.dp)
+                        )
+                        .heightIn(max = 200.dp)
+                        .verticalScroll(rememberScrollState())
+                        .horizontalScroll(rememberScrollState())
+                        .padding(8.dp)
+                ) {
+                    Text(
+                        text = msg.detail.take(2000),
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            lineHeight = 14.sp
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusMessageBlock(msg: WorkbenchMessage.Status) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(4.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = msg.text,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
 
 // ━━━━━━━━━━━━━ Tab 2: 需求 ━━━━━━━━━━━━━
@@ -601,13 +894,18 @@ private fun RequirementTabContent(task: WorkbenchTask) {
     }
 }
 
-// ━━━━━━━━━━━━━ Tab 2: 运行 ━━━━━━━━━━━━━
+// ━━━━━━━━━━━━━ Tab 0: 运行 ━━━━━━━━━━━━━
 @Composable
 private fun RunTabContent(
     task: WorkbenchTask,
+    files: List<String>,
     onRunApp: (String) -> Unit,
+    onReloadApp: (String) -> Unit = {},
     onRetry: (String) -> Unit,
-    onExport: (String) -> Unit = {}
+    onExport: (String) -> Unit = {},
+    onFileClick: (String) -> Unit = {},
+    onPickFile: () -> Unit = {},
+    onCreateFile: () -> Unit = {}
 ) {
     Column(
         modifier = Modifier
@@ -616,7 +914,43 @@ private fun RunTabContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Section 1: 程序说明
+        // Section 1: 文件系统
+        if (files.isNotEmpty()) {
+            FileTreeSection(files, onFileClick, onCreateFile)
+        } else if (task.status == TaskStatus.COMPLETED || task.status == TaskStatus.FAILED) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("暂无文件", style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onCreateFile) {
+                            Icon(Icons.Filled.Add, contentDescription = null,
+                                modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("新建文件")
+                        }
+                        OutlinedButton(onClick = onPickFile) {
+                            Icon(Icons.Outlined.AttachFile, contentDescription = null,
+                                modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("导入文件")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 2: 程序说明
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -643,7 +977,7 @@ private fun RunTabContent(
             }
         }
 
-        // Section 2: 运行应用
+        // Section 3: 运行应用
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(12.dp),
@@ -664,6 +998,16 @@ private fun RunTabContent(
                             modifier = Modifier.size(20.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("运行应用")
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { onReloadApp(task.appId) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null,
+                            modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("重载应用")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
@@ -930,137 +1274,6 @@ private fun FileEditorDialog(
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgentStepsSection(steps: List<AgentStep>) {
-    var expanded by remember { mutableStateOf(true) }
-    val listState = rememberLazyListState()
-
-    // Auto-scroll to bottom when new steps arrive
-    LaunchedEffect(steps.size) {
-        if (steps.isNotEmpty()) {
-            listState.animateScrollToItem(steps.size - 1)
-        }
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
-        )
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("执行日志", style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Medium)
-                Spacer(modifier = Modifier.weight(1f))
-                Text("${steps.size} 步", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically(),
-                exit = shrinkVertically()
-            ) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 400.dp)
-                        .padding(top = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    items(steps) { step ->
-                        StepItem(step)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StepItem(step: AgentStep) {
-    var showDetail by remember { mutableStateOf(false) }
-    val hasDetail = step.detail.isNotBlank()
-
-    val (dotColor, _) = when (step.type) {
-        StepType.THINKING -> MaterialTheme.colorScheme.tertiary to "💡"
-        StepType.TOOL_CALL -> MaterialTheme.colorScheme.primary to "🔧"
-        StepType.TOOL_RESULT -> if (step.description.startsWith("✓"))
-            MaterialTheme.colorScheme.primary to "✓" else
-            MaterialTheme.colorScheme.error to "✗"
-        StepType.FINAL_RESPONSE -> MaterialTheme.colorScheme.primary to "✅"
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(if (hasDetail) Modifier.clickable { showDetail = !showDetail } else Modifier)
-            .padding(vertical = 2.dp)
-    ) {
-        Row(verticalAlignment = Alignment.Top) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 5.dp)
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(dotColor)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    step.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = if (showDetail) Int.MAX_VALUE else 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                // Show detail line for tool calls (file names, arguments, etc.)
-                if (hasDetail && step.type == StepType.TOOL_CALL && !showDetail) {
-                    Text(
-                        step.detail.take(120),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                // Expanded detail view
-                if (showDetail && hasDetail) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        step.detail.take(500),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                }
-            }
-            if (hasDetail) {
-                Icon(
-                    if (showDetail) Icons.Outlined.KeyboardArrowDown
-                    else Icons.Outlined.KeyboardArrowRight,
-                    contentDescription = if (showDetail) "收起" else "展开",
-                    modifier = Modifier.size(16.dp).padding(top = 3.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                )
             }
         }
     }

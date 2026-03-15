@@ -12,434 +12,322 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
+import com.example.link_pi.agent.ModuleService
 import com.example.link_pi.agent.ModuleStorage
 import com.example.link_pi.bridge.NativeBridge
+import com.example.link_pi.bridge.RuntimeErrorCollector
+
 import com.example.link_pi.data.model.MiniApp
+import com.example.link_pi.miniapp.SdkManager
+import com.example.link_pi.miniapp.SdkModule
+import com.example.link_pi.miniapp.WebViewEntry
+import com.example.link_pi.miniapp.WebViewPool
 import com.example.link_pi.workspace.WorkspaceManager
 import java.io.File
 
-private const val NATIVE_FETCH_SCRIPT = """
-<script>
-window.__nfCbs={};
-window.__nfCb=function(id,b){
-    var c=window.__nfCbs[id];
-    if(c){delete window.__nfCbs[id];try{c(JSON.parse(atob(b)))}catch(e){c({error:e.message})}}
-};
-window.nativeFetch=function(url,o){
-    o=o||{};
-    return new Promise(function(resolve,reject){
-        if(!window.NativeBridge||!window.NativeBridge.httpRequest){
-            reject(new Error('NativeBridge unavailable'));return;
-        }
-        var id='_'+Math.random().toString(36).substr(2,9);
-        window.__nfCbs[id]=function(r){
-            if(r.error)reject(new Error(r.error));
-            else resolve({
-                status:r.status,statusText:r.statusText,headers:r.headers,
-                body:r.body,ok:r.status>=200&&r.status<300,
-                json:function(){return Promise.resolve(JSON.parse(r.body))},
-                text:function(){return Promise.resolve(r.body)}
-            });
-        };
-        NativeBridge.httpRequest(id,url,o.method||'GET',
-            JSON.stringify(o.headers||{}),o.body||'');
-    });
-};
-window.callModule=function(moduleName,endpointName,params){
-    return new Promise(function(resolve,reject){
-        if(!window.NativeBridge||!window.NativeBridge.callModule){
-            reject(new Error('NativeBridge unavailable'));return;
-        }
-        var id='_m'+Math.random().toString(36).substr(2,9);
-        window.__nfCbs[id]=function(r){
-            if(r.error)reject(new Error(r.error));
-            else resolve(r);
-        };
-        NativeBridge.callModule(id,moduleName,endpointName,
-            JSON.stringify(params||{}));
-    });
-};
-window.listModules=function(){
-    if(!window.NativeBridge||!window.NativeBridge.listModules) return [];
-    try{return JSON.parse(NativeBridge.listModules())}catch(e){return []}
-};
-window.__wsServerEvent=function(b){
-    try{var e=JSON.parse(atob(b));if(window.onServerEvent)window.onServerEvent(e);}catch(ex){}
-};
-window.startServer=function(port){
-    return new Promise(function(resolve,reject){
-        if(!window.NativeBridge||!window.NativeBridge.startWebSocketServer){
-            reject(new Error('NativeBridge unavailable'));return;
-        }
-        var id='_ws'+Math.random().toString(36).substr(2,9);
-        window.__nfCbs[id]=function(r){
-            if(r.ok)resolve({port:r.port,ip:r.ip});
-            else reject(new Error(r.error||'Failed'));
-        };
-        NativeBridge.startWebSocketServer(id,port||8080);
-    });
-};
-window.stopServer=function(){
-    if(window.NativeBridge&&window.NativeBridge.stopWebSocketServer)NativeBridge.stopWebSocketServer();
-};
-window.serverSend=function(clientId,msg){
-    if(window.NativeBridge&&window.NativeBridge.serverSend)NativeBridge.serverSend(clientId,msg);
-};
-window.serverBroadcast=function(msg){
-    if(window.NativeBridge&&window.NativeBridge.serverBroadcast)NativeBridge.serverBroadcast(msg);
-};
-window.getLocalIp=function(){
-    if(!window.NativeBridge||!window.NativeBridge.getLocalIpAddress)return '';
-    return NativeBridge.getLocalIpAddress();
-};
-</script>
-"""
-
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Always-mounted overlay host. Renders ALL alive MiniApp WebViews as stacked layers.
+ * Foreground app: alpha=1, zIndex=1 (visible + interactive).
+ * Background apps: alpha=0, zIndex=0 (invisible but DOM/JS alive).
+ *
+ * Call this once from NavGraph inside a Box that fills the screen.
+ * The [visible] flag controls whether ANY overlay is shown (false = all hidden).
+ */
 @Composable
-fun MiniAppScreen(
-    miniApp: MiniApp,
-    onBack: () -> Unit
+fun MiniAppOverlayHost(
+    pool: WebViewPool,
+    visible: Boolean,
+    currentApp: MiniApp?,
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(miniApp.name) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
-                    }
-                }
-            )
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            if (miniApp.isWorkspaceApp) {
-                WorkspaceMiniAppWebView(appId = miniApp.id, entryFile = miniApp.entryFile)
-            } else {
-                MiniAppWebView(appId = miniApp.id, htmlContent = miniApp.htmlContent)
+    val aliveEntries = pool.entries
+    // Use both pool.foregroundAppId (Compose state) and currentApp?.id for
+    // immediate foreground determination — whichever matches first wins.
+    val fgId = if (visible) (currentApp?.id ?: pool.foregroundAppId) else null
+
+    for ((appId, entry) in aliveEntries) {
+        val isForeground = visible && appId == fgId
+        key(appId) {
+            // Cold restore only when foreground
+            if (isForeground && currentApp != null && currentApp.id == appId) {
+                ColdRestoreEffect(entry)
             }
-        }
-    }
-}
-
-@SuppressLint("SetJavaScriptEnabled")
-@Composable
-fun MiniAppWebView(
-    appId: String = "default",
-    htmlContent: String,
-    onSendToApp: (String) -> Unit = {}
-) {
-    val context = LocalContext.current
-    val moduleStorage = remember { ModuleStorage(context) }
-    val cdnProxy = remember { CdnProxy(context) }
-    var nativeBridgeRef: NativeBridge? = null
-    val webView = remember {
-        WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowContentAccess = false
-                settings.allowFileAccess = false
-                settings.mediaPlaybackRequiresUserGesture = false
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                settings.blockNetworkLoads = false
-                settings.loadWithOverviewMode = true
-                settings.useWideViewPort = true
-
-                webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): WebResourceResponse? {
-                        val url = request?.url ?: return null
-                        val scheme = url.scheme?.lowercase()
-                        if (scheme == "https" || scheme == "http") {
-                            return cdnProxy.fetch(url.toString())
-                                ?: super.shouldInterceptRequest(view, request)
-                        }
-                        return super.shouldInterceptRequest(view, request)
-                    }
+            Box(
+                modifier = if (isForeground) {
+                    Modifier
+                        .fillMaxSize()
+                        .zIndex(1f)
+                } else {
+                    // Background: zero size to avoid intercepting touch events
+                    Modifier.size(0.dp)
                 }
-                webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                        consoleMessage?.let {
-                            Log.d("MiniAppJS", "[${it.messageLevel()}] ${it.message()} (line ${it.lineNumber()})")
-                        }
-                        return true
-                    }
-                }
-
-                val wv = this
-                val bridge = NativeBridge(context, appId, onSendToApp,
-                        jsEvaluator = { js -> wv.evaluateJavascript(js, null) },
-                        moduleStorage = moduleStorage
-                    )
-                nativeBridgeRef = bridge
-                addJavascriptInterface(bridge, "NativeBridge")
-
-                // Inject error overlay + nativeFetch polyfill before the HTML content
-                val errorOverlay = """
-                    <script>
-                    (function(){
-                        var errBox = null;
-                        function showErr(msg) {
-                            if(window.NativeBridge&&window.NativeBridge.reportError){try{NativeBridge.reportError(msg);}catch(e){}}
-                            if (!errBox) {
-                                errBox = document.createElement('div');
-                                errBox.id = '_err_overlay';
-                                errBox.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:rgba(0,0,0,0.85);color:#ff6b6b;font:12px monospace;padding:8px;z-index:999999;white-space:pre-wrap;';
-                                var closeBtn = document.createElement('span');
-                                closeBtn.textContent = ' [X] ';
-                                closeBtn.style.cssText = 'color:#fff;cursor:pointer;float:right;font-weight:bold;';
-                                closeBtn.onclick = function(){ errBox.style.display='none'; };
-                                errBox.appendChild(closeBtn);
-                                (document.body || document.documentElement).appendChild(errBox);
-                            }
-                            errBox.style.display = 'block';
-                            var line = document.createElement('div');
-                            line.textContent = msg;
-                            errBox.appendChild(line);
-                        }
-                        window.onerror = function(msg, src, line, col, err) {
-                            showErr('ERROR: ' + msg + ' (line ' + line + ')');
-                        };
-                        window.addEventListener('unhandledrejection', function(e) {
-                            showErr('PROMISE: ' + (e.reason || e));
-                        });
-                        // Detect CDN load failures
-                        document.addEventListener('error', function(e) {
-                            var t = e.target;
-                            if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
-                                showErr('LOAD FAILED: ' + (t.src || t.href));
-                            }
-                        }, true);
-                    })();
-                    </script>
-                """.trimIndent()
-
-                val scripts = errorOverlay + NATIVE_FETCH_SCRIPT
-                val injectedHtml = htmlContent.replace(
-                    Regex("<head([^>]*)>", RegexOption.IGNORE_CASE),
-                    "<head$1>" + scripts
-                ).let { result ->
-                    if (result == htmlContent && !htmlContent.contains("<head", ignoreCase = true)) {
-                        scripts + htmlContent
-                    } else result
-                }
-
-                loadDataWithBaseURL(
-                    "https://miniapp.local",
-                    injectedHtml,
-                    "text/html",
-                    "UTF-8",
-                    null
+            ) {
+                // Single AndroidView per entry — avoids dispose/recreate cycle
+                // that causes WebView rendering surface to ghost on transitions.
+                // View.GONE ensures the platform view stops drawing entirely.
+                AndroidView(
+                    factory = { entry.webView },
+                    update = { view ->
+                        view.visibility = if (isForeground)
+                            android.view.View.VISIBLE else android.view.View.GONE
+                    },
+                    modifier = if (isForeground) Modifier.fillMaxSize()
+                        else Modifier.size(0.dp)
                 )
             }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            nativeBridgeRef?.webSocketBridge?.stop()
-            webView.removeJavascriptInterface("NativeBridge")
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.destroy()
         }
     }
-
-    AndroidView(
-        factory = { webView },
-        modifier = Modifier.fillMaxSize()
-    )
 }
 
-/**
- * WebView for workspace-based multi-file apps.
- * Serves files from the workspace directory via a custom WebViewClient
- * that intercepts requests and loads from the local file system.
- */
+/** Inject script tags into HTML, before closing </head> or at the start if no <head>. */
+private fun injectScriptsIntoHtml(html: String, scripts: String): String {
+    val injected = html.replace(
+        Regex("<head([^>]*)>", RegexOption.IGNORE_CASE),
+        "<head$1>" + scripts
+    )
+    return if (injected == html && !html.contains("<head", ignoreCase = true)) {
+        scripts + html
+    } else injected
+}
+
+/** Create a WebViewEntry for a single-HTML MiniApp. Called from pool.show() factory. */
 @SuppressLint("SetJavaScriptEnabled")
-@Composable
-fun WorkspaceMiniAppWebView(
+fun createMiniAppEntry(
+    context: android.content.Context,
+    appId: String,
+    htmlContent: String,
+    onSendToApp: (String) -> Unit = {}
+): WebViewEntry {
+    val moduleStorage = ModuleStorage(context)
+    val moduleService = ModuleService(moduleStorage)
+    val cdnProxy = CdnProxy(context)
+    val webView = WebView(context).apply {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.allowContentAccess = false
+        settings.allowFileAccess = false
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        settings.blockNetworkLoads = false
+        settings.loadWithOverviewMode = true
+        settings.useWideViewPort = true
+
+        webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url ?: return null
+                val scheme = url.scheme?.lowercase()
+                if (scheme == "https" || scheme == "http") {
+                    return cdnProxy.fetch(url.toString())
+                        ?: super.shouldInterceptRequest(view, request)
+                }
+                return super.shouldInterceptRequest(view, request)
+            }
+        }
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                consoleMessage?.let {
+                    Log.d("MiniAppJS", "[${it.messageLevel()}] ${it.message()} (line ${it.lineNumber()})")
+                    if (it.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        RuntimeErrorCollector.report(appId, "${it.message()} (line ${it.lineNumber()})")
+                    } else {
+                        RuntimeErrorCollector.log(appId, it.messageLevel().name, it.message(), it.lineNumber())
+                    }
+                }
+                return true
+            }
+        }
+    }
+    val bridge = NativeBridge(context, appId, onSendToApp,
+        jsEvaluator = { js -> webView.evaluateJavascript(js, null) },
+        moduleStorage = moduleStorage,
+        moduleService = moduleService
+    )
+    webView.addJavascriptInterface(bridge, "NativeBridge")
+
+    // Inject all SDK scripts — real capability gating is at NativeBridge level
+    val sdkManager = SdkManager(context)
+    val scripts = sdkManager.buildSdkScripts(SdkModule.entries.toSet())
+    sdkManager.saveEnabledModules(appId, SdkModule.entries.toSet())
+    val injectedHtml = injectScriptsIntoHtml(htmlContent, scripts)
+
+    webView.loadDataWithBaseURL(
+        "https://miniapp.local",
+        injectedHtml,
+        "text/html",
+        "UTF-8",
+        null
+    )
+
+    return WebViewEntry(appId, webView, bridge)
+}
+
+/** Create a WebViewEntry for a workspace-based multi-file MiniApp. */
+@SuppressLint("SetJavaScriptEnabled")
+fun createWorkspaceMiniAppEntry(
+    context: android.content.Context,
     appId: String,
     entryFile: String = "index.html",
     onSendToApp: (String) -> Unit = {}
-) {
-    val context = LocalContext.current
-    val workspaceManager = remember { WorkspaceManager(context) }
-    val moduleStorage = remember { ModuleStorage(context) }
-    val workspaceDir = remember { workspaceManager.getWorkspaceDir(appId) }
-    val cdnProxy = remember { CdnProxy(context) }
-    var nativeBridgeRef: NativeBridge? = null
-    val webView = remember {
-        WebView(context).apply {
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowContentAccess = false
-                settings.allowFileAccess = false
-                settings.mediaPlaybackRequiresUserGesture = false
-                settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                settings.blockNetworkLoads = false
-                settings.loadWithOverviewMode = true
-                settings.useWideViewPort = true
+): WebViewEntry {
+    val workspaceManager = WorkspaceManager(context)
+    val moduleStorage = ModuleStorage(context)
+    val moduleService = ModuleService(moduleStorage)
+    val workspaceDir = workspaceManager.getWorkspaceDir(appId)
+    val cdnProxy = CdnProxy(context)
+    val webView = WebView(context).apply {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.allowContentAccess = false
+        settings.allowFileAccess = false
+        settings.mediaPlaybackRequiresUserGesture = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        settings.blockNetworkLoads = false
+        settings.loadWithOverviewMode = true
+        settings.useWideViewPort = true
 
-                webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(
-                        view: WebView?,
-                        request: WebResourceRequest?
-                    ): WebResourceResponse? {
-                        val url = request?.url ?: return null
-                        // Intercept requests to miniapp.local and serve from workspace
-                        if (url.host == "miniapp.local") {
-                            val path = url.path?.trimStart('/') ?: return null
-                            val file = File(workspaceDir, path)
-                            if (file.exists() && file.isFile && file.canonicalPath.startsWith(workspaceDir.canonicalPath)) {
-                                val mimeType = when (file.extension.lowercase()) {
-                                    "html", "htm" -> "text/html"
-                                    "css" -> "text/css"
-                                    "js" -> "application/javascript"
-                                    "json" -> "application/json"
-                                    "png" -> "image/png"
-                                    "jpg", "jpeg" -> "image/jpeg"
-                                    "gif" -> "image/gif"
-                                    "svg" -> "image/svg+xml"
-                                    "woff" -> "font/woff"
-                                    "woff2" -> "font/woff2"
-                                    "ttf" -> "font/ttf"
-                                    else -> "application/octet-stream"
-                                }
-                                return WebResourceResponse(
-                                    mimeType,
-                                    "UTF-8",
-                                    file.inputStream()
-                                )
-                            }
+        webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                val url = request?.url ?: return null
+                if (url.host == "miniapp.local") {
+                    val path = url.path?.trimStart('/') ?: return null
+                    val file = File(workspaceDir, path)
+                    if (file.exists() && file.isFile && file.canonicalPath.startsWith(workspaceDir.canonicalPath)) {
+                        val mimeType = when (file.extension.lowercase()) {
+                            "html", "htm" -> "text/html"
+                            "css" -> "text/css"
+                            "js" -> "application/javascript"
+                            "json" -> "application/json"
+                            "png" -> "image/png"
+                            "jpg", "jpeg" -> "image/jpeg"
+                            "gif" -> "image/gif"
+                            "svg" -> "image/svg+xml"
+                            "woff" -> "font/woff"
+                            "woff2" -> "font/woff2"
+                            "ttf" -> "font/ttf"
+                            else -> "application/octet-stream"
                         }
-                        // Proxy external HTTPS requests through OkHttp (CDN, fonts, etc.)
-                        val scheme = url.scheme?.lowercase()
-                        if (scheme == "https" || scheme == "http") {
-                            return cdnProxy.fetch(url.toString())
-                                ?: super.shouldInterceptRequest(view, request)
-                        }
-                        return super.shouldInterceptRequest(view, request)
+                        return WebResourceResponse(mimeType, "UTF-8", file.inputStream())
                     }
                 }
-
-                webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                        consoleMessage?.let {
-                            Log.d("MiniAppJS", "[${it.messageLevel()}] ${it.message()} (line ${it.lineNumber()})")
-                        }
-                        return true
-                    }
+                val scheme = url.scheme?.lowercase()
+                if (scheme == "https" || scheme == "http") {
+                    return cdnProxy.fetch(url.toString())
+                        ?: super.shouldInterceptRequest(view, request)
                 }
-
-                val wv = this
-                val bridge = NativeBridge(context, appId, onSendToApp,
-                        jsEvaluator = { js -> wv.evaluateJavascript(js, null) },
-                        moduleStorage = moduleStorage
-                    )
-                nativeBridgeRef = bridge
-                addJavascriptInterface(bridge, "NativeBridge")
-
-                // Read entry file and inject error overlay + nativeFetch
-                val entryContent = workspaceManager.readEntryFile(appId, entryFile) ?: "<html><body><h1>Entry file not found</h1></body></html>"
-
-                val errorOverlay = """
-                    <script>
-                    (function(){
-                        var errBox = null;
-                        function showErr(msg) {
-                            if(window.NativeBridge&&window.NativeBridge.reportError){try{NativeBridge.reportError(msg);}catch(e){}}
-                            if (!errBox) {
-                                errBox = document.createElement('div');
-                                errBox.id = '_err_overlay';
-                                errBox.style.cssText = 'position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:rgba(0,0,0,0.85);color:#ff6b6b;font:12px monospace;padding:8px;z-index:999999;white-space:pre-wrap;';
-                                var closeBtn = document.createElement('span');
-                                closeBtn.textContent = ' [X] ';
-                                closeBtn.style.cssText = 'color:#fff;cursor:pointer;float:right;font-weight:bold;';
-                                closeBtn.onclick = function(){ errBox.style.display='none'; };
-                                errBox.appendChild(closeBtn);
-                                (document.body || document.documentElement).appendChild(errBox);
-                            }
-                            errBox.style.display = 'block';
-                            var line = document.createElement('div');
-                            line.textContent = msg;
-                            errBox.appendChild(line);
-                        }
-                        window.onerror = function(msg, src, line, col, err) {
-                            showErr('ERROR: ' + msg + ' (line ' + line + ')');
-                        };
-                        window.addEventListener('unhandledrejection', function(e) {
-                            showErr('PROMISE: ' + (e.reason || e));
-                        });
-                        document.addEventListener('error', function(e) {
-                            var t = e.target;
-                            if (t && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
-                                showErr('LOAD FAILED: ' + (t.src || t.href));
-                            }
-                        }, true);
-                    })();
-                    </script>
-                """.trimIndent()
-
-                val scripts = errorOverlay + NATIVE_FETCH_SCRIPT
-                val injectedHtml = entryContent.replace(
-                    Regex("<head([^>]*)>", RegexOption.IGNORE_CASE),
-                    "<head$1>" + scripts
-                ).let { result ->
-                    if (result == entryContent && !entryContent.contains("<head", ignoreCase = true)) {
-                        scripts + entryContent
-                    } else result
-                }
-
-                // Load via https://miniapp.local so relative paths are intercepted
-                loadDataWithBaseURL(
-                    "https://miniapp.local/$entryFile",
-                    injectedHtml,
-                    "text/html",
-                    "UTF-8",
-                    null
-                )
+                return super.shouldInterceptRequest(view, request)
             }
-    }
+        }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            nativeBridgeRef?.webSocketBridge?.stop()
-            webView.removeJavascriptInterface("NativeBridge")
-            webView.stopLoading()
-            webView.loadUrl("about:blank")
-            webView.destroy()
+        webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                consoleMessage?.let {
+                    Log.d("MiniAppJS", "[${it.messageLevel()}] ${it.message()} (line ${it.lineNumber()})")
+                    if (it.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
+                        RuntimeErrorCollector.report(appId, "${it.message()} (line ${it.lineNumber()})")
+                    } else {
+                        RuntimeErrorCollector.log(appId, it.messageLevel().name, it.message(), it.lineNumber())
+                    }
+                }
+                return true
+            }
         }
     }
-
-    AndroidView(
-        factory = { webView },
-        modifier = Modifier.fillMaxSize()
+    val bridge = NativeBridge(context, appId, onSendToApp,
+        jsEvaluator = { js -> webView.evaluateJavascript(js, null) },
+        moduleStorage = moduleStorage,
+        moduleService = moduleService
     )
+    webView.addJavascriptInterface(bridge, "NativeBridge")
+
+    val entryContent = workspaceManager.readEntryFile(appId, entryFile)
+        ?: "<html><body><h1>Entry file not found</h1></body></html>"
+
+    // Inject all SDK scripts — real capability gating is at NativeBridge level
+    val sdkManager = SdkManager(context)
+    val enabled = sdkManager.getEnabledModules(appId).let { saved ->
+        if (saved.size <= 1) {
+            // First run: enable all modules by default
+            val all = SdkModule.entries.toSet()
+            sdkManager.saveEnabledModules(appId, all)
+            all
+        } else saved
+    }
+    val scripts = sdkManager.buildSdkScripts(enabled)
+    val injectedHtml = injectScriptsIntoHtml(entryContent, scripts)
+
+    webView.loadDataWithBaseURL(
+        "https://miniapp.local/$entryFile",
+        injectedHtml,
+        "text/html",
+        "UTF-8",
+        null
+    )
+
+    return WebViewEntry(appId, webView, bridge)
+}
+
+/**
+ * Applies cold-restore session state to a newly created WebViewEntry.
+ * Uses WebViewClient.onPageFinished instead of hardcoded delay.
+ * On hot path (pendingRestore == null), this is a no-op.
+ */
+@Composable
+private fun ColdRestoreEffect(entry: WebViewEntry) {
+    val restore = entry.pendingRestore ?: return
+    LaunchedEffect(entry.appId) {
+        // Use a CompletableDeferred-like approach: register onPageFinished callback
+        val latch = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val originalClient = entry.webView.webViewClient
+        entry.webView.webViewClient = object : WebViewClient() {
+            override fun onPageFinished(view: WebView?, url: String?) {
+                // Restore original client first
+                entry.webView.webViewClient = originalClient
+                latch.complete(Unit)
+            }
+            override fun shouldInterceptRequest(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): WebResourceResponse? {
+                return originalClient.shouldInterceptRequest(view, request)
+            }
+        }
+
+        // Wait for page to finish loading (with 3s safety timeout)
+        kotlinx.coroutines.withTimeoutOrNull(3000) { latch.await() }
+
+        val hash = restore.state["url_hash"]
+        if (!hash.isNullOrEmpty()) {
+            val safeHash = hash.replace("\\", "\\\\").replace("'", "\\'")
+            entry.webView.evaluateJavascript("window.location.hash='$safeHash';", null)
+        }
+        val scrollY = restore.state["scroll_y"]
+        if (!scrollY.isNullOrEmpty()) {
+            entry.webView.evaluateJavascript("window.scrollTo(0,$scrollY);", null)
+        }
+        val jsState = restore.state["js_state"]
+        if (!jsState.isNullOrEmpty()) {
+            val escaped = jsState.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+            entry.webView.evaluateJavascript(
+                "if(typeof window.__onResume==='function'){window.__onResume('$escaped');}",
+                null
+            )
+        }
+        entry.pendingRestore = null
+    }
 }
 
 /**
@@ -461,7 +349,10 @@ private class CdnProxy(context: android.content.Context) {
     }
 
     fun fetch(url: String): WebResourceResponse? {
-        val safeKey = url.hashCode().toUInt().toString(16)
+        val safeKey = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(url.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+            .take(16)
         val cached = File(cacheDir, safeKey)
         val metaFile = File(cacheDir, "$safeKey.meta")
 

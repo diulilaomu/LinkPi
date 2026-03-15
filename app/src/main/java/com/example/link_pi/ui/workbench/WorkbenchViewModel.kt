@@ -125,6 +125,12 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
     /** Load a MiniApp by ID for running. */
     fun loadMiniApp(appId: String) = miniAppStorage.loadById(appId)
 
+    /** Update MiniApp name and icon. */
+    fun updateMiniAppInfo(appId: String, name: String, iconPath: String) {
+        val existing = miniAppStorage.loadById(appId) ?: return
+        miniAppStorage.save(existing.copy(name = name, icon = iconPath))
+    }
+
     /** Get workspace files for a task. */
     fun getWorkspaceFiles(appId: String): List<String> =
         try { workspaceManager.getAllFiles(appId) } catch (_: Exception) { emptyList() }

@@ -274,6 +274,7 @@ class GenerationService : Service() {
         @Suppress("DEPRECATION")
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "LinkPi::Generation").apply {
+            setReferenceCounted(false) // prevent double-release crashes
             acquire()
         }
     }

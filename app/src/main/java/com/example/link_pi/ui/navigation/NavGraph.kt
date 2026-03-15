@@ -5,7 +5,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,7 +22,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -33,6 +31,8 @@ import androidx.compose.material.icons.outlined.Menu
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Extension
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -46,6 +46,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -69,15 +71,24 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.link_pi.ui.chat.ChatScreen
 import com.example.link_pi.ui.chat.ChatViewModel
 import com.example.link_pi.ui.miniapp.MiniAppListScreen
-import com.example.link_pi.ui.miniapp.MiniAppScreen
+import com.example.link_pi.ui.miniapp.MiniAppOverlayHost
+import com.example.link_pi.ui.miniapp.createMiniAppEntry
+import com.example.link_pi.ui.miniapp.createWorkspaceMiniAppEntry
 import com.example.link_pi.ui.miniapp.exportMiniApp
 import com.example.link_pi.ui.settings.MemoryScreen
 import com.example.link_pi.ui.settings.CredentialScreen
 import com.example.link_pi.ui.settings.ModelEditScreen
 import com.example.link_pi.ui.settings.ModelManageScreen
 import com.example.link_pi.ui.settings.ModuleScreen
+import com.example.link_pi.ui.settings.SessionScreen
 import com.example.link_pi.ui.settings.SettingsScreen
 import com.example.link_pi.ui.settings.ShareScreen
+import com.example.link_pi.ui.settings.SecurityAuditScreen
+import com.example.link_pi.data.session.AppSessionManager
+import com.example.link_pi.data.session.AppType
+import com.example.link_pi.miniapp.WebViewPool
+import com.example.link_pi.data.SessionRegistry
+import androidx.compose.material.icons.outlined.CleaningServices
 import com.example.link_pi.ui.permission.PermissionScreen
 import com.example.link_pi.ui.permission.allPermissionsGranted
 import com.example.link_pi.ui.ssh.SshHomeScreen
@@ -88,6 +99,8 @@ import com.example.link_pi.ui.skill.SkillListScreen
 import com.example.link_pi.ui.workbench.WorkbenchDetailScreen
 import com.example.link_pi.ui.workbench.WorkbenchListScreen
 import com.example.link_pi.ui.workbench.WorkbenchViewModel
+import com.example.link_pi.LaunchRequest
+import com.example.link_pi.MainActivity
 
 sealed class Screen(val route: String, val title: String) {
     data object Chat : Screen("chat", "LinkPi")
@@ -103,12 +116,14 @@ sealed class Screen(val route: String, val title: String) {
     data object ModuleSettings : Screen("settings/modules", "模块管理")
     data object CredentialSettings : Screen("settings/credentials", "凭据管理")
     data object ShareSettings : Screen("settings/share", "本地分享")
+    data object SecurityAudit : Screen("settings/security", "安全审计")
+    data object SessionManage : Screen("settings/sessions", "会话管理")
     data object SshHome : Screen("ssh_home", "SSH 终端")
     data object SshMode : Screen("ssh_mode", "SSH Terminal")
 }
 
 @Composable
-fun LinkPiApp() {
+fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
     val context = LocalContext.current
     var permissionsHandled by remember { mutableStateOf(allPermissionsGranted(context)) }
 
@@ -121,12 +136,90 @@ fun LinkPiApp() {
     val workbenchViewModel: WorkbenchViewModel = viewModel()
     val sshViewModel: SshViewModel = viewModel()
     val sshHomeViewModel: SshHomeViewModel = viewModel()
-    var currentPage by remember { mutableStateOf<String>(Screen.Chat.route) }
+    val appSessionManager = remember { AppSessionManager(context) }
+    val webViewPool = remember { WebViewPool(sessionManager = appSessionManager, context = context) }
+    var currentPage by remember {
+        mutableStateOf(
+            when {
+                launchPage != null -> launchPage
+                launchMiniAppId != null -> Screen.MiniApp.route
+                else -> Screen.Chat.route
+            }
+        )
+    }
     var editModelId by remember { mutableStateOf("") }
+    var isShortcutLaunch by remember { mutableStateOf(launchPage != null || launchMiniAppId != null) }
 
+    var previousPage by remember { mutableStateOf(Screen.Chat.route) }
     var activeDetailTaskId by remember { mutableStateOf("") }
     var lastBackTime by remember { mutableLongStateOf(0L) }
     var showConversationList by remember { mutableStateOf(false) }
+    // Helper: finish activity (back to desktop)
+    val finishToDesktop = {
+        chatViewModel.saveBeforeExit()
+        (context as? android.app.Activity)?.finish()
+        Unit
+    }
+
+    // Cleanup WebViewPool and expired sessions when Activity is destroyed
+    DisposableEffect(Unit) {
+        appSessionManager.cleanupExpired()
+        onDispose { webViewPool.destroyAll() }
+    }
+
+    // Handle shortcut launch: load mini app by ID (needs async storage read)
+    LaunchedEffect(launchMiniAppId) {
+        if (launchMiniAppId != null) {
+            val app = chatViewModel.miniAppStorage.loadById(launchMiniAppId)
+            if (app != null) {
+                chatViewModel.setCurrentApp(app)
+                currentPage = Screen.MiniApp.route
+            }
+        }
+    }
+
+    // Handle onNewIntent: navigate immediately during composition (zero-frame-delay)
+    val activity = context as? MainActivity
+    var pendingMiniAppLoad by remember { mutableStateOf<String?>(null) }
+    val pendingRequest = activity?.pendingLaunchRequest
+    if (pendingRequest != null) {
+        activity?.pendingLaunchRequest = null
+        if (currentPage == Screen.SshMode.route) {
+            SideEffect { sshViewModel.exitScreen() }
+        }
+        when {
+            pendingRequest.page != null -> {
+                currentPage = pendingRequest.page
+            }
+            pendingRequest.miniAppId != null -> {
+                pendingMiniAppLoad = pendingRequest.miniAppId
+                isShortcutLaunch = true
+                // Switch to MiniApp route immediately; overlay will show once app loads
+                currentPage = Screen.MiniApp.route
+            }
+            else -> {
+                currentPage = Screen.Chat.route
+            }
+        }
+    }
+
+    // Async: load miniapp by ID when requested via onNewIntent
+    LaunchedEffect(pendingMiniAppLoad) {
+        val id = pendingMiniAppLoad ?: return@LaunchedEffect
+        pendingMiniAppLoad = null
+        val app = chatViewModel.miniAppStorage.loadById(id)
+        if (app != null) {
+            chatViewModel.setCurrentApp(app)
+            // Directly show in pool — skip the extra LaunchedEffect frame
+            webViewPool.show(app.id) {
+                if (app.isWorkspaceApp) {
+                    createWorkspaceMiniAppEntry(context, app.id, app.entryFile)
+                } else {
+                    createMiniAppEntry(context, app.id, app.htmlContent)
+                }
+            }
+        }
+    }
 
     // Back handler: sub-pages go back to parent, main page requires double-back to exit
     BackHandler {
@@ -138,7 +231,7 @@ fun LinkPiApp() {
             Screen.Chat.route -> {
                 val now = System.currentTimeMillis()
                 if (now - lastBackTime < 2000) {
-                    (context as? android.app.Activity)?.finish()
+                    finishToDesktop()
                 } else {
                     lastBackTime = now
                     Toast.makeText(context, "再滑一次退出应用", Toast.LENGTH_SHORT).show()
@@ -149,11 +242,38 @@ fun LinkPiApp() {
             Screen.MemorySettings.route,
             Screen.ModuleSettings.route,
             Screen.CredentialSettings.route,
-            Screen.ShareSettings.route -> currentPage = Screen.Settings.route
+            Screen.ShareSettings.route,
+            Screen.SessionManage.route -> currentPage = Screen.Settings.route
             Screen.ModelEdit("").route -> currentPage = Screen.ModelManage.route
             Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
-            Screen.SshHome.route -> currentPage = Screen.Workbench.route
+            Screen.MiniApp.route -> {
+                if (isShortcutLaunch) finishToDesktop()
+                else { currentPage = previousPage; isShortcutLaunch = false }
+            }
+            Screen.SshHome.route -> {
+                if (isShortcutLaunch) finishToDesktop()
+                else currentPage = Screen.Workbench.route
+            }
             else -> currentPage = Screen.Chat.route
+        }
+    }
+
+    // MiniApp overlay lifecycle: show/hide based on currentPage and currentApp
+    val currentApp by chatViewModel.currentMiniApp.collectAsState()
+    LaunchedEffect(currentPage, currentApp?.id) {
+        if (currentPage == Screen.MiniApp.route) {
+            val app = currentApp
+            if (app != null) {
+                webViewPool.show(app.id) {
+                    if (app.isWorkspaceApp) {
+                        createWorkspaceMiniAppEntry(context, app.id, app.entryFile)
+                    } else {
+                        createMiniAppEntry(context, app.id, app.htmlContent)
+                    }
+                }
+            }
+        } else {
+            webViewPool.hideAll()
         }
     }
 
@@ -167,18 +287,10 @@ fun LinkPiApp() {
             },
             onDisconnect = {
                 sshViewModel.disconnect()
+                appSessionManager.destroy("builtin:ssh")
                 currentPage = Screen.SshHome.route
             }
         )
-        return
-    }
-
-    // MiniApp has its own full-screen layout
-    if (currentPage == Screen.MiniApp.route) {
-        val app = chatViewModel.currentMiniApp
-        if (app != null) {
-            MiniAppScreen(miniApp = app, onBack = { currentPage = Screen.Chat.route })
-        }
         return
     }
 
@@ -274,9 +386,6 @@ fun LinkPiApp() {
                         Icon(Icons.Outlined.Menu, contentDescription = "会话历史")
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    IconButton(onClick = { currentPage = Screen.Workbench.route }) {
-                        Icon(Icons.Outlined.GridView, contentDescription = "工作台")
-                    }
                 }
                 else -> {
                     val title = when (currentPage) {
@@ -290,6 +399,8 @@ fun LinkPiApp() {
                         Screen.ModuleSettings.route -> Screen.ModuleSettings.title
                         Screen.CredentialSettings.route -> Screen.CredentialSettings.title
                         Screen.ShareSettings.route -> Screen.ShareSettings.title
+                        Screen.SecurityAudit.route -> Screen.SecurityAudit.title
+                        Screen.SessionManage.route -> Screen.SessionManage.title
                         else -> ""
                     }
                     val backTarget = when (currentPage) {
@@ -298,7 +409,9 @@ fun LinkPiApp() {
                         Screen.MemorySettings.route,
                         Screen.ModuleSettings.route,
                         Screen.CredentialSettings.route,
-                        Screen.ShareSettings.route -> Screen.Settings.route
+                        Screen.ShareSettings.route,
+                        Screen.SecurityAudit.route,
+                        Screen.SessionManage.route -> Screen.Settings.route
                         Screen.ModelEdit("").route -> Screen.ModelManage.route
                         else -> Screen.Chat.route
                     }
@@ -306,6 +419,12 @@ fun LinkPiApp() {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                     Text(title, style = MaterialTheme.typography.titleLarge)
+                    if (currentPage == Screen.SessionManage.route) {
+                        Spacer(modifier = Modifier.weight(1f))
+                        IconButton(onClick = { SessionRegistry.getInstance(context).cleanupEnded() }) {
+                            Icon(Icons.Outlined.CleaningServices, contentDescription = "清理已结束")
+                        }
+                    }
                 }
             }
         }
@@ -322,6 +441,7 @@ fun LinkPiApp() {
                     viewModel = chatViewModel,
                     onRunApp = { app ->
                         chatViewModel.setCurrentApp(app)
+                        previousPage = currentPage
                         currentPage = Screen.MiniApp.route
                     },
                     onEnterSshMode = { sessionId ->
@@ -354,7 +474,12 @@ fun LinkPiApp() {
                         onNewTask = {
                             currentPage = Screen.Chat.route
                         },
-                        onOpenSsh = { currentPage = Screen.SshHome.route }
+                        onOpenSsh = { currentPage = Screen.SshHome.route },
+                        onRunApp = { miniApp ->
+                            chatViewModel.setCurrentApp(miniApp)
+                            previousPage = currentPage
+                            currentPage = Screen.MiniApp.route
+                        }
                     )
                 }
                 Screen.WorkbenchDetail.route -> {
@@ -366,6 +491,18 @@ fun LinkPiApp() {
                             val app = workbenchViewModel.loadMiniApp(appId)
                             if (app != null) {
                                 chatViewModel.setCurrentApp(app)
+                                previousPage = currentPage
+                                currentPage = Screen.MiniApp.route
+                            } else {
+                                Toast.makeText(context, "应用不存在或未完成生成", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        onReloadApp = { appId ->
+                            webViewPool.evict(appId)
+                            val app = workbenchViewModel.loadMiniApp(appId)
+                            if (app != null) {
+                                chatViewModel.setCurrentApp(app)
+                                previousPage = currentPage
                                 currentPage = Screen.MiniApp.route
                             } else {
                                 Toast.makeText(context, "应用不存在或未完成生成", Toast.LENGTH_SHORT).show()
@@ -386,20 +523,39 @@ fun LinkPiApp() {
                 }
                 Screen.Apps.route -> MiniAppListScreen(
                     storage = chatViewModel.miniAppStorage,
+                    webViewPool = webViewPool,
                     onRunApp = { app ->
                         chatViewModel.setCurrentApp(app)
+                        previousPage = currentPage
                         currentPage = Screen.MiniApp.route
                     }
                 )
-                Screen.SshHome.route -> SshHomeScreen(
-                    viewModel = sshHomeViewModel,
-                    onBack = { currentPage = Screen.Workbench.route },
-                    onEnterSession = { sessionId, manualMode ->
-                        sshViewModel.enterSession(sessionId)
-                        if (manualMode) sshViewModel.setManualMode(true)
-                        currentPage = Screen.SshMode.route
-                    }
-                )
+                Screen.SshHome.route -> {
+                    SshHomeScreen(
+                        viewModel = sshHomeViewModel,
+                        onBack = {
+                            if (isShortcutLaunch) finishToDesktop()
+                            else currentPage = Screen.Workbench.route
+                        },
+                        onEnterSession = { sessionId, manualMode ->
+                            // Save for session restore
+                            val serverInfo = sshViewModel.sshManager.getSessionInfo(sessionId)
+                            if (serverInfo != null) {
+                                val servers = com.example.link_pi.data.SavedServerStorage(context).loadAll()
+                                val matched = servers.find { it.host == serverInfo.host && it.port == serverInfo.port }
+                                if (matched != null) {
+                                    appSessionManager.suspend("builtin:ssh", AppType.BUILTIN_SSH, mapOf(
+                                        "server_id" to matched.id,
+                                        "manual_mode" to manualMode.toString()
+                                    ))
+                                }
+                            }
+                            sshViewModel.enterSession(sessionId)
+                            if (manualMode) sshViewModel.setManualMode(true)
+                            currentPage = Screen.SshMode.route
+                        }
+                    )
+                }
                 Screen.Settings.route -> SettingsScreen(
                     onNavigate = { route -> currentPage = route }
                 )
@@ -422,6 +578,10 @@ fun LinkPiApp() {
                 Screen.ModuleSettings.route -> ModuleScreen()
                 Screen.CredentialSettings.route -> CredentialScreen()
                 Screen.ShareSettings.route -> ShareScreen()
+                Screen.SecurityAudit.route -> SecurityAuditScreen()
+                Screen.SessionManage.route -> SessionScreen(
+                    sessionRegistry = SessionRegistry.getInstance(context)
+                )
             }
         }
     } // end Column
@@ -449,12 +609,27 @@ fun LinkPiApp() {
                     chatViewModel.newConversation()
                     showConversationList = false
                 },
+                onNavigateModules = {
+                    showConversationList = false
+                    currentPage = Screen.ModuleSettings.route
+                },
+                onNavigateWorkbench = {
+                    showConversationList = false
+                    currentPage = Screen.Workbench.route
+                },
                 onNavigateSettings = {
                     showConversationList = false
                     currentPage = Screen.Settings.route
                 }
             )
         }
+
+        // ── MiniApp overlay layer (always mounted, visibility via alpha/zIndex) ──
+        MiniAppOverlayHost(
+            pool = webViewPool,
+            visible = currentPage == Screen.MiniApp.route,
+            currentApp = currentApp,
+        )
     } // end Box
 }
 
@@ -465,6 +640,8 @@ private fun ConversationListPanel(
     onSelect: (String) -> Unit,
     onDelete: (String) -> Unit,
     onNewConversation: () -> Unit,
+    onNavigateModules: () -> Unit,
+    onNavigateWorkbench: () -> Unit,
     onNavigateSettings: () -> Unit
 ) {
     val conversations by chatViewModel.conversations.collectAsState()
@@ -479,8 +656,8 @@ private fun ConversationListPanel(
             shadowElevation = 8.dp
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                // ── 上部：会话列表 (90%) ──
-                Column(modifier = Modifier.weight(0.9f)) {
+                // ── 上部：会话列表 ──
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "会话历史",
                         style = MaterialTheme.typography.titleMedium,
@@ -561,31 +738,30 @@ private fun ConversationListPanel(
                     }
                 }
 
-                // ── 下部：功能图标栏 (10%) ──
+                // ── 下部：功能图标栏 ──
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Row(
                     modifier = Modifier
-                        .weight(0.1f)
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp),
+                        .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     // 新建会话
                     Surface(
                         onClick = onNewConversation,
-                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
                         color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
                     ) {
                         Column(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Icon(
                                 Icons.Outlined.Edit,
                                 contentDescription = "新对话",
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onPrimaryContainer
                             )
                             Spacer(modifier = Modifier.height(2.dp))
@@ -596,20 +772,71 @@ private fun ConversationListPanel(
                             )
                         }
                     }
-                    // 设置
+                    // 模块管理
                     Surface(
-                        onClick = onNavigateSettings,
-                        shape = RoundedCornerShape(12.dp),
+                        onClick = onNavigateModules,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHigh
                     ) {
                         Column(
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Outlined.Extension,
+                                contentDescription = "模块",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "模块",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                    // 应用工厂
+                    Surface(
+                        onClick = onNavigateWorkbench,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                Icons.Outlined.AutoAwesome,
+                                contentDescription = "应用",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "应用",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                    // 设置
+                    Surface(
+                        onClick = onNavigateSettings,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Icon(
                                 Icons.Outlined.Settings,
                                 contentDescription = "设置",
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(20.dp),
                                 tint = MaterialTheme.colorScheme.onSurface
                             )
                             Spacer(modifier = Modifier.height(2.dp))

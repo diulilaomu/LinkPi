@@ -10,7 +10,14 @@ import com.example.link_pi.agent.SshManager
 import com.example.link_pi.agent.SshOrchestrator
 import com.example.link_pi.agent.SshOrchestrator.CommandStatus
 import com.example.link_pi.agent.SshOrchestrator.SshCommand
+import com.example.link_pi.data.CredentialStorage
+import com.example.link_pi.data.SavedServer
+import com.example.link_pi.data.SavedServerStorage
+import com.example.link_pi.data.SessionRegistry
 import com.example.link_pi.data.model.Attachment
+import com.example.link_pi.data.model.ManagedSession
+import com.example.link_pi.data.model.SessionSource
+import com.example.link_pi.data.model.SessionType
 import com.example.link_pi.network.AiConfig
 import com.example.link_pi.network.AiService
 import com.example.link_pi.network.ModelConfig
@@ -63,6 +70,12 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
     private val aiService = AiService(aiConfig)
     val sshManager = SshManager.getInstance(application)
     private val orchestrator = SshOrchestrator(aiService, sshManager)
+    private val sessionRegistry = SessionRegistry.getInstance(application)
+    private val serverStorage = SavedServerStorage(application)
+    private val credentialStorage = CredentialStorage(application)
+
+    // Track whether SSH_ASSIST session has been registered
+    private var sshSessionRegistered = false
 
     // ── Session State ──
     private val _sessionId = MutableStateFlow<String?>(null)
@@ -99,6 +112,16 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
 
     val isModelConfigured: Boolean get() = aiConfig.isConfigured
 
+    // ── Saved Servers (for session switcher) ──
+    private val _savedServers = MutableStateFlow<List<SavedServer>>(emptyList())
+    val savedServers: StateFlow<List<SavedServer>> = _savedServers.asStateFlow()
+
+    private val _switcherConnecting = MutableStateFlow<String?>(null)
+    val switcherConnecting: StateFlow<String?> = _switcherConnecting.asStateFlow()
+
+    private val _switcherError = MutableStateFlow<String?>(null)
+    val switcherError: StateFlow<String?> = _switcherError.asStateFlow()
+
     // ── Attachments ──
     private val _pendingAttachments = MutableStateFlow<List<Attachment>>(emptyList())
     val pendingAttachments: StateFlow<List<Attachment>> = _pendingAttachments.asStateFlow()
@@ -115,6 +138,8 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
     private var shellReadJob: Job? = null
     private var savedMainBuffer: ScreenBuffer? = null  // alternate screen buffer backup
     private val screenBuffer = ScreenBuffer()
+    private val bufferLock = Any()   // guards all screenBuffer / savedMainBuffer access
+    private var escapeResidue = ""   // incomplete escape sequence from previous TCP read
     private var ptyCols = 80
     private var ptyRows = 40
     private val _isAlternateScreen = MutableStateFlow(false)
@@ -206,6 +231,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         _isReconnecting.value = false
         reconnectJob?.cancel()
         if (!isSameSession) {
+            sshSessionRegistered = false
             _messages.value = emptyList()
             _pendingCommands.value = emptyList()
             _executionResults.value = emptyList()
@@ -214,6 +240,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         val info = sshManager.getSessionInfo(sshSessionId)
         if (info != null) {
             _serverInfo.value = ServerInfo(info.host, info.port, info.username)
+            KeepAliveService.addClient(getApplication(), "ssh", "SSH: ${info.host}")
         }
 
         // Probe server info in background (skip if re-entering same session)
@@ -306,6 +333,29 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(text: String) {
         if (text.isBlank() && _pendingAttachments.value.isEmpty()) return
         if (_isLoading.value) return
+
+        // Check if session is paused
+        val sid = _sessionId.value
+        if (sid != null && sessionRegistry.isPaused(sid)) return
+
+        // Lazy session registration: register on first AI message
+        if (!sshSessionRegistered && sid != null) {
+            val info = _serverInfo.value
+            sessionRegistry.register(
+                ManagedSession(
+                    id = sid,
+                    type = SessionType.SSH_ASSIST,
+                    label = "${info?.host ?: "SSH"} 辅助",
+                    source = SessionSource.FROM_SSH,
+                    modelId = _activeModelId.value,
+                    messageCount = 1,
+                    metadata = buildMap {
+                        info?.host?.let { put("sshHost", "${it}:${info.port}") }
+                    }
+                )
+            )
+            sshSessionRegistered = true
+        }
 
         val attachments = _pendingAttachments.value.toList()
         _pendingAttachments.value = emptyList()
@@ -468,7 +518,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         altScreenWatcher = null
 
         // Collect the last few lines of terminal output as context
-        val termOut = screenBuffer.render()
+        val termOut = synchronized(bufferLock) { screenBuffer.render() }
         val lastLines = termOut.lines().takeLast(20).joinToString("\n")
 
         // Mark command as completed in pending list
@@ -692,7 +742,13 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setManualMode(enabled: Boolean) {
         _isManualMode.value = enabled
-        if (enabled) openShellSession() else suspendShellReader()
+        if (enabled) {
+            openShellSession()
+            _sessionId.value?.let { sessionRegistry.pauseSession(it) }
+        } else {
+            suspendShellReader()
+            _sessionId.value?.let { sessionRegistry.resumeSession(it) }
+        }
     }
 
     /** Store password in memory for auto-reconnect. */
@@ -709,6 +765,67 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         reconnectJob?.cancel()
         reconnectJob = null
     }
+
+    // ── Session Switcher ──
+
+    /** Refresh saved servers list for switcher. */
+    fun refreshSavedServers() {
+        _savedServers.value = serverStorage.loadAll()
+        _switcherError.value = null
+    }
+
+    /** Get all active SSH sessions from SshManager. */
+    fun fetchActiveSessions(): List<SshManager.SshSessionInfo> = sshManager.getActiveSessions()
+
+    /** Switch to an existing active session. */
+    fun switchToSession(targetSessionId: String) {
+        if (targetSessionId == _sessionId.value) return
+        // Pause current shell reader, but keep connection alive
+        closeShellSession()
+        // Enter new session
+        enterSession(targetSessionId)
+    }
+
+    /** Connect to a saved server and enter the new session. */
+    fun connectAndSwitch(server: SavedServer) {
+        if (_switcherConnecting.value != null) return
+        _switcherConnecting.value = server.id
+        _switcherError.value = null
+
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val cred = if (server.credentialId.isNotBlank()) {
+                        credentialStorage.findById(server.credentialId)
+                    } else null
+
+                    sshManager.connect(
+                        host = server.host,
+                        port = server.port,
+                        username = cred?.username ?: "",
+                        password = cred?.secret,
+                        credentialName = if (cred == null && server.credentialName.isNotBlank())
+                            server.credentialName else null
+                    )
+                }
+
+                if (result.startsWith("Error:")) {
+                    _switcherError.value = result.removePrefix("Error: ")
+                } else {
+                    val json = org.json.JSONObject(result)
+                    val newSid = json.getString("session_id")
+                    closeShellSession()
+                    enterSession(newSid)
+                }
+            } catch (e: Exception) {
+                _switcherError.value = e.message ?: "连接失败"
+            } finally {
+                _switcherConnecting.value = null
+            }
+        }
+    }
+
+    fun clearSwitcherError() { _switcherError.value = null }
 
     /** Manually trigger reconnect. */
     fun reconnect() {
@@ -759,7 +876,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
-        screenBuffer.clear()
+        synchronized(bufferLock) { screenBuffer.clear() }
         _terminalOutput.value = AnnotatedString("")
         viewModelScope.launch(Dispatchers.IO) {
             if (sshManager.openShell(sid, ptyCols, ptyRows)) {
@@ -842,64 +959,114 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         val enterSeqs = listOf("\u001B[?1049h", "\u001B[?47h", "\u001B[?1047h")
         val leaveSeqs = listOf("\u001B[?1049l", "\u001B[?47l", "\u001B[?1047l")
 
-        var remaining = raw
+        synchronized(bufferLock) {
+            // Prepend any leftover from a previous TCP read that ended mid-escape
+            val data = escapeResidue + raw
+            escapeResidue = ""
 
-        // Check for enter alt screen
-        val enterIdx = enterSeqs.map { remaining.indexOf(it) }.filter { it >= 0 }.minOrNull()
-        if (enterIdx != null) {
-            val seq = enterSeqs.first { remaining.indexOf(it) == enterIdx }
-            // Process content before the enter sequence on the main buffer
-            val before = remaining.substring(0, enterIdx)
-            if (before.isNotEmpty()) screenBuffer.process(before)
-            // Save main buffer and switch to alt screen
-            savedMainBuffer = screenBuffer.snapshot()
-            screenBuffer.clear()
-            _isAlternateScreen.value = true
-            remaining = remaining.substring(enterIdx + seq.length)
+            // Peel off a trailing incomplete escape sequence so we don't mis-parse it.
+            // An incomplete sequence starts with ESC and has no final byte yet.
+            val finalData: String
+            val lastEsc = data.lastIndexOf('\u001B')
+            if (lastEsc >= 0 && lastEsc >= data.length - 20) {
+                val tail = data.substring(lastEsc)
+                if (isIncompleteEscape(tail)) {
+                    escapeResidue = tail
+                    finalData = data.substring(0, lastEsc)
+                } else {
+                    finalData = data
+                }
+            } else {
+                finalData = data
+            }
+
+            var remaining = finalData
+
+            // Check for enter alt screen
+            val enterIdx = enterSeqs.map { remaining.indexOf(it) }.filter { it >= 0 }.minOrNull()
+            if (enterIdx != null) {
+                val seq = enterSeqs.first { remaining.indexOf(it) == enterIdx }
+                // Process content before the enter sequence on the main buffer
+                val before = remaining.substring(0, enterIdx)
+                if (before.isNotEmpty()) screenBuffer.process(before)
+                // Save main buffer and switch to alt screen
+                savedMainBuffer = screenBuffer.snapshot()
+                screenBuffer.clear()
+                _isAlternateScreen.value = true
+                remaining = remaining.substring(enterIdx + seq.length)
+            }
+
+            // Check for leave alt screen
+            val leaveIdx = leaveSeqs.map { remaining.indexOf(it) }.filter { it >= 0 }.minOrNull()
+            if (leaveIdx != null) {
+                val seq = leaveSeqs.first { remaining.indexOf(it) == leaveIdx }
+                // Process content before the leave sequence on the alt buffer (for rendering)
+                val before = remaining.substring(0, leaveIdx)
+                if (before.isNotEmpty()) screenBuffer.process(before)
+                // Restore main buffer
+                savedMainBuffer?.let { screenBuffer.restoreFrom(it) }
+                savedMainBuffer = null
+                _isAlternateScreen.value = false
+                remaining = remaining.substring(leaveIdx + seq.length)
+            }
+
+            // Process remaining content on current buffer
+            if (remaining.isNotEmpty()) screenBuffer.process(remaining)
+
+            _cursorShouldBlink.value = screenBuffer.cursorBlink
+            if (_isAlternateScreen.value) {
+                _terminalOutput.value = screenBuffer.renderAnnotated(showCursor = true, excludeBottomRows = 2)
+                _statusLine.value = screenBuffer.renderStatusLines(showCursor = true, bottomRows = 2)
+            } else {
+                _terminalOutput.value = screenBuffer.renderAnnotated(showCursor = true)
+                _statusLine.value = AnnotatedString("")
+            }
         }
+    }
 
-        // Check for leave alt screen
-        val leaveIdx = leaveSeqs.map { remaining.indexOf(it) }.filter { it >= 0 }.minOrNull()
-        if (leaveIdx != null) {
-            val seq = leaveSeqs.first { remaining.indexOf(it) == leaveIdx }
-            // Process content before the leave sequence on the alt buffer (for rendering)
-            val before = remaining.substring(0, leaveIdx)
-            if (before.isNotEmpty()) screenBuffer.process(before)
-            // Restore main buffer
-            savedMainBuffer?.let { screenBuffer.restoreFrom(it) }
-            savedMainBuffer = null
-            _isAlternateScreen.value = false
-            remaining = remaining.substring(leaveIdx + seq.length)
-        }
-
-        // Process remaining content on current buffer
-        if (remaining.isNotEmpty()) screenBuffer.process(remaining)
-
-        _cursorShouldBlink.value = screenBuffer.cursorBlink
-        if (_isAlternateScreen.value) {
-            _terminalOutput.value = screenBuffer.renderAnnotated(showCursor = true, excludeBottomRows = 2)
-            _statusLine.value = screenBuffer.renderStatusLines(showCursor = true, bottomRows = 2)
-        } else {
-            _terminalOutput.value = screenBuffer.renderAnnotated(showCursor = true)
-            _statusLine.value = AnnotatedString("")
+    /** Check if a string starting with ESC is an incomplete escape sequence. */
+    private fun isIncompleteEscape(s: String): Boolean {
+        if (s.length == 1 && s[0] == '\u001B') return true  // bare ESC
+        if (s.length < 2 || s[0] != '\u001B') return false
+        return when (s[1]) {
+            '[' -> {
+                // CSI: ESC [ params intermediates final-byte
+                // Final byte is in 0x40..0x7E. If none found, it's incomplete.
+                for (i in 2 until s.length) {
+                    val c = s[i]
+                    if (c in '0'..'9' || c == ';' || c == '?' || c == '>') continue  // param
+                    if (c in '\u0020'..'\u002F') continue  // intermediate
+                    return false  // found final byte → complete
+                }
+                true  // no final byte → incomplete
+            }
+            ']' -> {
+                // OSC: ESC ] ... BEL  or  ESC ] ... ESC backslash
+                !s.contains('\u0007') && !s.contains("\u001B\\")
+            }
+            else -> false  // other 2-char sequences are always complete
         }
     }
 
     /** Re-render the screen buffer with cursor visible or hidden (for blink). */
     fun renderOutput(showCursor: Boolean): AnnotatedString {
-        return if (_isAlternateScreen.value) {
-            screenBuffer.renderAnnotated(showCursor = showCursor, excludeBottomRows = 2)
-        } else {
-            screenBuffer.renderAnnotated(showCursor = showCursor)
+        synchronized(bufferLock) {
+            return if (_isAlternateScreen.value) {
+                screenBuffer.renderAnnotated(showCursor = showCursor, excludeBottomRows = 2)
+            } else {
+                screenBuffer.renderAnnotated(showCursor = showCursor)
+            }
         }
     }
 
     /** Re-render the status lines with cursor visible or hidden (for blink). */
     fun renderStatusOutput(showCursor: Boolean): AnnotatedString {
-        return if (_isAlternateScreen.value) {
-            screenBuffer.renderStatusLines(showCursor = showCursor, bottomRows = 2)
-        } else {
-            AnnotatedString("")
+        synchronized(bufferLock) {
+            return if (_isAlternateScreen.value) {
+                screenBuffer.renderStatusLines(showCursor = showCursor, bottomRows = 2)
+            } else {
+                AnnotatedString("")
+            }
         }
     }
 
@@ -1452,7 +1619,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         if (cols == ptyCols && rows == ptyRows) return
         ptyCols = cols
         ptyRows = rows
-        screenBuffer.resize(cols, rows)
+        synchronized(bufferLock) { screenBuffer.resize(cols, rows) }
         val sid = _sessionId.value ?: return
         viewModelScope.launch(Dispatchers.IO) {
             sshManager.resizePty(sid, cols, rows)
@@ -1474,7 +1641,7 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearTerminal() {
-        screenBuffer.clear()
+        synchronized(bufferLock) { screenBuffer.clear() }
         _terminalOutput.value = AnnotatedString("")
         sendControlChar('L')
     }
@@ -1521,7 +1688,12 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         _isSessionDropped.value = false
         _isReconnecting.value = false
         closeShellSession()
-        _sessionId.value?.let { sshManager.disconnect(it) }
+        _sessionId.value?.let {
+            sessionRegistry.endSession(it)
+            sshManager.disconnect(it)
+        }
+        KeepAliveService.removeClient(getApplication(), "ssh")
+        sshSessionRegistered = false
         _sessionId.value = null
         _isConnected.value = false
         _isManualMode.value = false
