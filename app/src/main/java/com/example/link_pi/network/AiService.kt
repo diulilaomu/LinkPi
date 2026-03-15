@@ -18,7 +18,11 @@ private val BACKOFF_MS = longArrayOf(2_000, 4_000, 8_000)
 
 data class ChatResponse(
     val content: String,
-    val thinkingContent: String = ""
+    val thinkingContent: String = "",
+    /** "stop" = normal completion, "length" = max_tokens truncated, "tool_calls" = function calling, null = unknown */
+    val finishReason: String? = null,
+    /** Structured tool calls from function calling API (empty = none) */
+    val toolCalls: List<com.example.link_pi.agent.ToolCall> = emptyList()
 )
 
 class AiService(private val config: AiConfig) {
@@ -27,6 +31,7 @@ class AiService(private val config: AiConfig) {
      * When set, all API calls use this model config instead of config.activeModel.
      * This enables concurrent task execution without global config races.
      */
+    @Volatile
     var modelOverride: ModelConfig? = null
 
     /** Effective model config: override if set, otherwise active from AiConfig. */
@@ -105,7 +110,8 @@ class AiService(private val config: AiConfig) {
         messages: List<Map<String, String>>,
         maxTokens: Int = effectiveModel.maxTokens,
         temperature: Double = effectiveModel.temperature,
-        enableThinking: Boolean = effectiveModel.enableThinking
+        enableThinking: Boolean = effectiveModel.enableThinking,
+        tools: JSONArray? = null
     ): ChatResponse = withContext(Dispatchers.IO) {
         val model = effectiveModel
         val endpoint = normalizeEndpoint(model.endpoint)
@@ -119,6 +125,9 @@ class AiService(private val config: AiConfig) {
             put("max_tokens", maxTokens)
             if (enableThinking) {
                 put("enable_thinking", true)
+            }
+            if (tools != null && tools.length() > 0) {
+                put("tools", tools)
             }
         }
 
@@ -138,12 +147,15 @@ class AiService(private val config: AiConfig) {
 
                     if (resp.isSuccessful) {
                         val json = JSONObject(body)
-                        val message = json.getJSONArray("choices")
-                            .getJSONObject(0)
-                            .getJSONObject("message")
+                        val choice = json.getJSONArray("choices").getJSONObject(0)
+                        val message = choice.getJSONObject("message")
                         val content = if (message.isNull("content")) "" else message.optString("content", "")
                         val thinking = if (message.isNull("reasoning_content")) "" else message.optString("reasoning_content", "")
-                        return@withContext ChatResponse(content, thinking)
+                        val finishReason = choice.optString("finish_reason", "").let { if (it.isEmpty() || it == "null") null else it }
+                        val apiToolCalls = if (!message.isNull("tool_calls")) {
+                            com.example.link_pi.agent.ToolCall.fromApiToolCalls(message.getJSONArray("tool_calls"))
+                        } else emptyList()
+                        return@withContext ChatResponse(content, thinking, finishReason, apiToolCalls)
                     }
 
                     val code = resp.code
@@ -177,6 +189,7 @@ class AiService(private val config: AiConfig) {
         maxTokens: Int = effectiveModel.maxTokens,
         temperature: Double = effectiveModel.temperature,
         enableThinking: Boolean = effectiveModel.enableThinking,
+        tools: JSONArray? = null,
         onThinkingDelta: (accumulated: String) -> Unit = {},
         onContentDelta: (accumulated: String) -> Unit = {}
     ): ChatResponse = withContext(Dispatchers.IO) {
@@ -193,6 +206,9 @@ class AiService(private val config: AiConfig) {
             put("stream", true)
             if (enableThinking) {
                 put("enable_thinking", true)
+            }
+            if (tools != null && tools.length() > 0) {
+                put("tools", tools)
             }
         }
 
@@ -238,17 +254,23 @@ class AiService(private val config: AiConfig) {
         var pendingThinkingChars = 0
         var pendingContentChars = 0
 
+        // ── Function calling: accumulate streaming tool_calls ──
+        // Key: tool call index, Value: (id, name, arguments buffer)
+        val toolCallAccumulator = mutableMapOf<Int, Triple<String, String, StringBuilder>>()
+
         val reader: BufferedReader = safeResponse.body?.byteStream()?.bufferedReader()
             ?: throw IOException("Empty stream body")
 
         var sseError: String? = null
+        var receivedDone = false
+        var lastFinishReason: String? = null
 
         reader.use { r ->
             var line = r.readLine()
             while (line != null) {
                 if (line.startsWith("data: ")) {
                     val data = line.removePrefix("data: ").trim()
-                    if (data == "[DONE]") break   // stream finished — exit immediately
+                    if (data == "[DONE]") { receivedDone = true; break }
                     try {
                         val chunk = JSONObject(data)
 
@@ -260,9 +282,14 @@ class AiService(private val config: AiConfig) {
                             break
                         }
 
-                        val delta = chunk.getJSONArray("choices")
+                        val choice = chunk.getJSONArray("choices")
                             .getJSONObject(0)
-                            .optJSONObject("delta")
+
+                        // Track finish_reason from the last chunk
+                        val fr = choice.optString("finish_reason", "")
+                        if (fr.isNotEmpty() && fr != "null") lastFinishReason = fr
+
+                        val delta = choice.optJSONObject("delta")
 
                         if (delta != null) {
                             val thinkDelta = if (delta.isNull("reasoning_content")) ""
@@ -277,6 +304,29 @@ class AiService(private val config: AiConfig) {
                             if (contentDelta.isNotEmpty()) {
                                 contentBuf.append(contentDelta)
                                 pendingContentChars += contentDelta.length
+                            }
+
+                            // Accumulate streaming tool_calls deltas
+                            val tcArray = delta.optJSONArray("tool_calls")
+                            if (tcArray != null) {
+                                for (j in 0 until tcArray.length()) {
+                                    val tcDelta = tcArray.getJSONObject(j)
+                                    val idx = tcDelta.optInt("index", j)
+                                    val func = tcDelta.optJSONObject("function")
+                                    if (func != null) {
+                                        val existing = toolCallAccumulator[idx]
+                                        if (existing == null) {
+                                            // First chunk for this tool call — extract id and name
+                                            val id = tcDelta.optString("id", "call_$idx")
+                                            val name = func.optString("name", "")
+                                            val argsBuf = StringBuilder(func.optString("arguments", ""))
+                                            toolCallAccumulator[idx] = Triple(id, name, argsBuf)
+                                        } else {
+                                            // Subsequent chunk — append arguments delta
+                                            existing.third.append(func.optString("arguments", ""))
+                                        }
+                                    }
+                                }
                             }
                         }
                     } catch (_: Exception) { /* skip malformed chunks */ }
@@ -303,6 +353,15 @@ class AiService(private val config: AiConfig) {
             throw IOException("API SSE error: $sseError")
         }
 
+        // Stream ended without [DONE] — connection was dropped (NAT timeout, proxy reset, etc.)
+        if (!receivedDone && contentBuf.isNotEmpty() && toolCallAccumulator.isEmpty()) {
+            throw IOException("Stream disconnected without [DONE] (received ${contentBuf.length} chars)")
+        }
+
+        // finish_reason == "length" means max_tokens was hit — content is truncated
+        // Return it with the flag so callers can handle continuation
+        val truncated = lastFinishReason == "length"
+
         // Final emit of reasoning preview
         if (thinkingBuf.isNotEmpty() && pendingThinkingChars > 0) {
             onThinkingDelta(thinkingBuf.toString().takeLast(REASONING_PREVIEW_CHARS))
@@ -312,7 +371,26 @@ class AiService(private val config: AiConfig) {
             onContentDelta(contentBuf.toString())
         }
 
-        ChatResponse(contentBuf.toString(), thinkingBuf.toString())
+        // Build structured tool calls from accumulated stream deltas
+        val streamToolCalls = toolCallAccumulator.entries
+            .sortedBy { it.key }
+            .mapNotNull { (_, triple) ->
+                val (id, name, argsBuf) = triple
+                if (name.isBlank()) return@mapNotNull null
+                try {
+                    val argsJson = JSONObject(argsBuf.toString().ifBlank { "{}" })
+                    val args = mutableMapOf<String, String>()
+                    for (key in argsJson.keys()) {
+                        args[key] = argsJson.optString(key, "")
+                    }
+                    com.example.link_pi.agent.ToolCall(name, args, id)
+                } catch (_: Exception) {
+                    // Arguments JSON may be truncated if stream was cut; still create the call
+                    com.example.link_pi.agent.ToolCall(name, emptyMap(), id)
+                }
+            }
+
+        ChatResponse(contentBuf.toString(), thinkingBuf.toString(), lastFinishReason, streamToolCalls)
     }
 
     private fun appendCapped(buffer: StringBuilder, delta: String, maxChars: Int) {
@@ -331,13 +409,42 @@ class AiService(private val config: AiConfig) {
      * - if it doesn't contain /chat/completions, try to append it
      */
     /**
-     * Build JSON messages array, supporting multimodal content via `_images` key.
+     * Build JSON messages array, supporting:
+     * - multimodal content via `_images` key
+     * - function calling: `role=tool` with `tool_call_id`, and `role=assistant` with `_tool_calls`
      */
     private fun buildJsonMessages(messages: List<Map<String, String>>): JSONArray {
         val arr = JSONArray()
         for (msg in messages) {
+            val role = msg["role"] ?: "user"
             arr.put(JSONObject().apply {
-                put("role", msg["role"])
+                put("role", role)
+
+                // ── tool role: function calling result ──
+                if (role == "tool") {
+                    put("content", msg["content"] ?: "")
+                    msg["tool_call_id"]?.let { put("tool_call_id", it) }
+                    msg["name"]?.let { put("name", it) }
+                    return@apply
+                }
+
+                // ── assistant with tool_calls: function calling request ──
+                if (role == "assistant") {
+                    val toolCallsJson = msg["_tool_calls"]
+                    if (toolCallsJson != null) {
+                        // content can be null when only tool_calls are present
+                        val content = msg["content"]
+                        if (content.isNullOrBlank()) {
+                            put("content", JSONObject.NULL)
+                        } else {
+                            put("content", content)
+                        }
+                        put("tool_calls", JSONArray(toolCallsJson))
+                        return@apply
+                    }
+                }
+
+                // ── Standard message (user / assistant / system) ──
                 val images = msg["_images"]
                 if (images != null) {
                     val contentArray = JSONArray()

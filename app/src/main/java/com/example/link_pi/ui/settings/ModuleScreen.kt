@@ -6,6 +6,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,13 +22,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,6 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.link_pi.agent.ModuleService
 import com.example.link_pi.agent.ModuleStorage
 
 @Composable
@@ -55,8 +60,8 @@ fun ModuleScreen() {
     var deleteTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
     var editTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
     var exportTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
+    var detailTarget by remember { mutableStateOf<ModuleStorage.Module?>(null) }
 
-    // Import launcher
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -75,7 +80,6 @@ fun ModuleScreen() {
         }
     }
 
-    // Export launcher
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
@@ -103,7 +107,7 @@ fun ModuleScreen() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "AI 创建的 API 模块，可供小应用调用",
+                "Python 服务模块 (HTTP / TCP / UDP)",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)
@@ -127,7 +131,7 @@ fun ModuleScreen() {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "在聊天中让 AI 创建 API 模块，或点击右上角导入",
+                    "在聊天中让 AI 创建模块，或点击右上角导入",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                 )
@@ -137,9 +141,11 @@ fun ModuleScreen() {
                 items(modules, key = { it.id }) { module ->
                     ModuleCard(
                         module = module,
-                        onEdit = if (module.isBuiltIn) null else {{ editTarget = module }},
-                        onDelete = if (module.isBuiltIn) null else {{ deleteTarget = module }},
-                        onExport = if (module.isBuiltIn) null else {{
+                        moduleStorage = moduleStorage,
+                        onClick = { detailTarget = module },
+                        onEdit = {{ editTarget = module }},
+                        onDelete = {{ deleteTarget = module }},
+                        onExport = {{
                             exportTarget = module
                             exportLauncher.launch("${module.name}.json")
                         }}
@@ -175,17 +181,25 @@ fun ModuleScreen() {
         EditModuleDialog(
             module = module,
             onDismiss = { editTarget = null },
-            onSave = { name, desc, baseUrl, instructions ->
+            onSave = { name, desc, instructions ->
                 moduleStorage.updateModule(
                     module.id,
                     name = name.takeIf { it.isNotBlank() },
                     description = desc.takeIf { it.isNotBlank() },
-                    baseUrl = baseUrl.takeIf { it.isNotBlank() },
                     instructions = instructions
                 )
                 modules = moduleStorage.loadAll()
                 editTarget = null
             }
+        )
+    }
+
+    // ── Detail dialog ──
+    detailTarget?.let { module ->
+        ModuleDetailDialog(
+            module = module,
+            moduleStorage = moduleStorage,
+            onDismiss = { detailTarget = null }
         )
     }
 }
@@ -194,11 +208,10 @@ fun ModuleScreen() {
 private fun EditModuleDialog(
     module: ModuleStorage.Module,
     onDismiss: () -> Unit,
-    onSave: (name: String, description: String, baseUrl: String, instructions: String) -> Unit
+    onSave: (name: String, description: String, instructions: String) -> Unit
 ) {
     var name by remember { mutableStateOf(module.name) }
     var description by remember { mutableStateOf(module.description) }
-    var baseUrl by remember { mutableStateOf(module.baseUrl) }
     var instructions by remember { mutableStateOf(module.instructions) }
 
     AlertDialog(
@@ -224,13 +237,6 @@ private fun EditModuleDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 OutlinedTextField(
-                    value = baseUrl,
-                    onValueChange = { baseUrl = it },
-                    label = { Text("基础 URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
                     value = instructions,
                     onValueChange = { instructions = it },
                     label = { Text("使用说明 (AI 可读)") },
@@ -240,7 +246,7 @@ private fun EditModuleDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSave(name, description, baseUrl, instructions) }) {
+            TextButton(onClick = { onSave(name, description, instructions) }) {
                 Text("保存")
             }
         },
@@ -250,106 +256,231 @@ private fun EditModuleDialog(
     )
 }
 
+// ── Detail Dialog ──
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModuleDetailDialog(
+    module: ModuleStorage.Module,
+    moduleStorage: ModuleStorage,
+    onDismiss: () -> Unit
+) {
+    val scripts = moduleStorage.listScripts(module.id)
+    val readme = moduleStorage.getReadme(module.id)
+    val sdf = remember { java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(module.name)
+                Spacer(modifier = Modifier.width(8.dp))
+                TypeBadge(module.serviceType)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Service info
+                DetailRow("服务类型", module.serviceType)
+                if (module.defaultPort > 0) {
+                    DetailRow("默认端口", module.defaultPort.toString())
+                }
+                DetailRow("入口脚本", module.mainScript)
+
+                // Description
+                if (module.description.isNotBlank()) {
+                    DetailRow("描述", module.description)
+                }
+
+                // Instructions
+                if (module.instructions.isNotBlank()) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    Text("使用说明", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                    Text(
+                        module.instructions.take(300),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Script files
+                if (scripts.isNotEmpty()) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    Text("脚本文件", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        scripts.forEach { name ->
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.5f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.Code,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text(
+                                        name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // README excerpt
+                if (readme != null && readme.isNotBlank()) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Outlined.Description,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("README", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
+                    }
+                    Text(
+                        readme.take(500),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                // Metadata
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                DetailRow("版本", "v${module.version}")
+                DetailRow("创建", sdf.format(module.createdAt))
+                DetailRow("更新", sdf.format(module.updatedAt))
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
+}
+
+@Composable
+private fun DetailRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(72.dp)
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun TypeBadge(serviceType: String) {
+    val (text, color) = when (serviceType.uppercase()) {
+        "HTTP" -> "HTTP" to MaterialTheme.colorScheme.primary
+        "TCP" -> "TCP" to MaterialTheme.colorScheme.secondary
+        "UDP" -> "UDP" to MaterialTheme.colorScheme.tertiary
+        else -> serviceType to MaterialTheme.colorScheme.outline
+    }
+    Surface(
+        shape = RoundedCornerShape(4.dp),
+        color = color.copy(alpha = 0.15f)
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Medium,
+            color = color
+        )
+    }
+}
+
+// ── Module Card ──
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ModuleCard(
     module: ModuleStorage.Module,
+    moduleStorage: ModuleStorage,
+    onClick: () -> Unit,
     onEdit: (() -> Unit)?,
     onDelete: (() -> Unit)?,
     onExport: (() -> Unit)?
 ) {
+    val scriptFiles = moduleStorage.listScripts(module.id)
+
     Card(
-        modifier = Modifier.fillMaxWidth().let { m ->
-            if (onEdit != null) m.clickable(onClick = onEdit) else m
-        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
+            // Row 1: Name + type badge + actions
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            module.name,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Medium
-                        )
-                        if (module.protocol != "HTTP") {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
-                            ) {
-                                Text(
-                                    module.protocol,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.secondary
-                                )
-                            }
-                        }
-                    }
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        module.baseUrl,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                        module.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    TypeBadge(module.serviceType)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "${module.endpoints.size} 端点",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (module.isBuiltIn) {
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            Icons.Outlined.Lock,
-                            contentDescription = "内置",
-                            modifier = Modifier.size(16.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                    }
                     if (onEdit != null) {
                         IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                Icons.Outlined.Edit,
-                                contentDescription = "编辑",
+                            Icon(Icons.Outlined.Edit, contentDescription = "编辑",
                                 modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                            )
+                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
                         }
                     }
                     if (onExport != null) {
                         IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                Icons.Outlined.Share,
-                                contentDescription = "导出",
+                            Icon(Icons.Outlined.Share, contentDescription = "导出",
                                 modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
                         }
                     }
                     if (onDelete != null) {
                         IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                Icons.Outlined.Delete,
-                                contentDescription = "删除",
+                            Icon(Icons.Outlined.Delete, contentDescription = "删除",
                                 modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
-                            )
+                                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
                         }
                     }
                 }
             }
 
+            // Row 2: Description
             if (module.description.isNotBlank()) {
                 Text(
                     module.description,
@@ -357,57 +488,29 @@ private fun ModuleCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 4.dp)
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
 
-            if (module.endpoints.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(8.dp))
-                module.endpoints.forEach { ep ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+            // Row 3: Info chips (port, main script, scripts count)
+            val infoParts = mutableListOf<String>()
+            if (module.defaultPort > 0) infoParts.add("端口 ${module.defaultPort}")
+            infoParts.add(module.mainScript)
+            if (scriptFiles.isNotEmpty()) infoParts.add("${scriptFiles.size} 脚本")
+
+            if (infoParts.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    infoParts.forEach { info ->
                         Surface(
                             shape = RoundedCornerShape(4.dp),
-                            color = when (ep.method.uppercase()) {
-                                "GET" -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
-                                "POST" -> MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                "PUT" -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
-                                "DELETE" -> MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
-                                else -> MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
-                            }
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh
                         ) {
                             Text(
-                                if (ep.encoding == "hex") "${ep.method.uppercase()}/HEX" else ep.method.uppercase(),
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                info,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Medium,
-                                color = when (ep.method.uppercase()) {
-                                    "GET" -> MaterialTheme.colorScheme.tertiary
-                                    "POST" -> MaterialTheme.colorScheme.primary
-                                    "PUT" -> MaterialTheme.colorScheme.secondary
-                                    "DELETE" -> MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.outline
-                                }
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            ep.name,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium
-                        )
-                        if (ep.description.isNotBlank()) {
-                            Text(
-                                " — ${ep.description}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }

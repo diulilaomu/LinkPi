@@ -15,6 +15,56 @@ class WorkspaceManager(private val context: Context) {
         val META_FILES = setOf("APP_INFO.json", "ARCHITECTURE.md")
     }
 
+    // ── Read-before-write tracking (inspired by OpenCode FileTime) ──
+    // Key: "appId::relativePath", Value: timestamp of last read
+    private val fileReadTimes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    // ── Per-file write lock (inspired by OpenCode FileTime.withLock) ──
+    private val fileLocks = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    private fun lockFor(appId: String, path: String): Any =
+        fileLocks.getOrPut("$appId::$path") { Any() }
+
+    /** Record that a file was read in the current session. */
+    fun markFileRead(appId: String, relativePath: String) {
+        fileReadTimes["$appId::$relativePath"] = System.currentTimeMillis()
+    }
+
+    /** Check if a file has been read in the current session. */
+    private fun wasFileRead(appId: String, relativePath: String): Boolean {
+        return fileReadTimes.containsKey("$appId::$relativePath")
+    }
+
+    /** Clear all read tracking (call when switching workspace). */
+    fun clearReadTracking() {
+        fileReadTimes.clear()
+    }
+
+    // ── Truncated output persistence ──
+    private val truncatedOutputDir: File
+        get() = File(context.cacheDir, "truncated_outputs").also { it.mkdirs() }
+
+    /**
+     * Save truncated content to a temp file, return a path AI can reference.
+     * Returns the saved filename so AI can use read_workspace_file-like access.
+     */
+    fun saveTruncatedOutput(content: String, toolName: String): String {
+        val ts = System.currentTimeMillis()
+        val file = File(truncatedOutputDir, "${toolName}_$ts.txt")
+        file.writeText(content)
+        // Prune old files (keep last 20)
+        truncatedOutputDir.listFiles()?.sortedByDescending { it.lastModified() }?.drop(20)?.forEach { it.delete() }
+        return file.name
+    }
+
+    /** Read a previously saved truncated output. */
+    fun readTruncatedOutput(filename: String): String? {
+        val clean = filename.replace("/", "").replace("\\", "").replace("..", "")
+        if (clean.isBlank()) return null
+        val file = File(truncatedOutputDir, clean)
+        return if (file.exists() && file.isFile && file.canonicalFile.parentFile?.canonicalPath == truncatedOutputDir.canonicalPath)
+            file.readText() else null
+    }
+
     private val workspacesRoot: File
         get() = File(context.filesDir, "workspaces").also { it.mkdirs() }
 
@@ -42,10 +92,12 @@ class WorkspaceManager(private val context: Context) {
         if (relativePath.isBlank()) return "Error: path cannot be empty. Specify a file path like 'index.html' or 'js/app.js'"
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
-        if (file.exists() && file.isFile) snapshotFile(appId, relativePath)
-        file.parentFile?.mkdirs()
-        file.writeText(content)
-        return "Written: $relativePath (${content.length} chars)"
+        synchronized(lockFor(appId, relativePath)) {
+            if (file.exists() && file.isFile) snapshotFile(appId, relativePath)
+            file.parentFile?.mkdirs()
+            file.writeText(content)
+            return "Written: $relativePath (${content.length} chars)"
+        }
     }
 
     /** Append content to a file. Creates if not exists. */
@@ -53,18 +105,21 @@ class WorkspaceManager(private val context: Context) {
         if (relativePath.isBlank()) return "Error: path cannot be empty"
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
-        file.parentFile?.mkdirs()
-        file.appendText(content)
-        return "Appended to: $relativePath (+${content.length} chars)"
+        synchronized(lockFor(appId, relativePath)) {
+            file.parentFile?.mkdirs()
+            file.appendText(content)
+            return "Appended to: $relativePath (+${content.length} chars)"
+        }
     }
 
-    /** Read file content. */
+    /** Read file content. Records read time for read-before-write assertion. */
     fun readFile(appId: String, relativePath: String): String {
         if (relativePath.isBlank()) return "Error: path cannot be empty"
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
         if (!file.exists()) return "Error: file not found: $relativePath"
         if (!file.isFile) return "Error: not a file: $relativePath"
+        markFileRead(appId, relativePath)
         val content = file.readText()
         val lines = content.lines()
         // Add line numbers for reference
@@ -74,12 +129,13 @@ class WorkspaceManager(private val context: Context) {
         } else numbered
     }
 
-    /** Read file content by line range (1-indexed, inclusive). */
+    /** Read file content by line range (1-indexed, inclusive). Records read time. */
     fun readFileLines(appId: String, relativePath: String, startLine: Int, endLine: Int): String {
         if (relativePath.isBlank()) return "Error: path cannot be empty"
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
         if (!file.exists()) return "Error: file not found: $relativePath"
+        markFileRead(appId, relativePath)
         val lines = file.readText().lines()
         val s = (startLine - 1).coerceIn(0, lines.size)
         val e = endLine.coerceIn(s, lines.size)
@@ -87,69 +143,280 @@ class WorkspaceManager(private val context: Context) {
             "\n(showing lines $startLine-$e of ${lines.size})"
     }
 
-    /** Replace exact text in a file (locate-and-edit). Falls back to whitespace-normalized matching. Auto-snapshots before modifying. */
+    /**
+     * Replace text in a file using cascading multi-level matching (inspired by OpenCode/Cline).
+     * 9 strategies tried in order: exact → line-trimmed → block-anchor(Levenshtein) →
+     * whitespace-normalized → indentation-flexible → escape-normalized → trimmed-boundary →
+     * context-aware → multi-occurrence. Auto-snapshots before modifying.
+     */
     fun replaceInFile(appId: String, relativePath: String, oldText: String, newText: String): String {
         if (relativePath.isBlank()) return "Error: path cannot be empty"
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
         if (!file.exists()) return "Error: file not found: $relativePath"
-        val content = file.readText()
-
-        // 1. Exact match
-        val count = content.split(oldText).size - 1
-        if (count == 1) {
-            snapshotFile(appId, relativePath)
-            file.writeText(content.replace(oldText, newText))
-            return "Replaced in: $relativePath (1 occurrence, exact match)"
+        if (oldText == newText) return "Error: old_text and new_text are identical, no change needed"
+        // Read-before-write assertion: AI must read the file before editing
+        if (!wasFileRead(appId, relativePath)) {
+            return "Error: you must read_workspace_file('$relativePath') before editing it. " +
+                "This ensures old_text is accurate and avoids match failures."
         }
-        if (count > 1) return "Error: text appears $count times in $relativePath, be more specific"
+        synchronized(lockFor(appId, relativePath)) {
+            val content = file.readText()
 
-        // 2. Whitespace-normalized match (collapse spaces/tabs, normalize line endings)
-        val normalizeWs = { s: String -> s.replace(Regex("[ \\t]+"), " ").replace(Regex("\\r\\n?"), "\n").trim() }
-        val oldNorm = normalizeWs(oldText)
+            // Normalize line endings for matching; preserve original line ending style for output
+            val lineEnding = if (content.contains("\r\n")) "\r\n" else "\n"
+            val normContent = content.replace("\r\n", "\n")
+            val normOld = oldText.replace("\r\n", "\n")
+            val normNew = newText.replace("\r\n", "\n")
+
+            val result = cascadingReplace(normContent, normOld, normNew)
+            if (result != null) {
+                if (result.strategy == "ambiguous") {
+                    return "Error: old_text matches multiple locations in $relativePath. Add more surrounding context to make it unique."
+                }
+                snapshotFile(appId, relativePath)
+                val output = if (lineEnding == "\r\n") result.content.replace("\n", "\r\n") else result.content
+                file.writeText(output)
+                return "Replaced in: $relativePath (${result.strategy})"
+            }
+
+            // Not found — provide helpful context
+            val contentLines = normContent.lines()
+            val firstLine = normOld.lines().firstOrNull()?.trim() ?: ""
+            val hint = if (firstLine.isNotEmpty()) {
+                val lineNum = contentLines.indexOfFirst { it.trim().contains(firstLine) }
+                if (lineNum >= 0) " Hint: similar text found near line ${lineNum + 1}. Use read_workspace_file to re-read the file, or use replace_lines with line numbers."
+                else " The first line of old_text was not found anywhere. Re-read the file with read_workspace_file and try again."
+            } else ""
+            return "Error: text not found in $relativePath.$hint"
+        }
+    }
+
+    /** Result of a successful cascading replace. */
+    private data class ReplaceResult(val content: String, val strategy: String)
+
+    /**
+     * Try 9 matching strategies in order; return new content on first unique match.
+     * Mirrors OpenCode's edit.ts cascading replacer chain.
+     */
+    private fun cascadingReplace(content: String, oldStr: String, newStr: String): ReplaceResult? {
+        data class Match(val start: Int, val end: Int)
+
+        // Helper: apply a single unique match
+        fun applyMatch(m: Match, strategy: String): ReplaceResult {
+            return ReplaceResult(
+                content.substring(0, m.start) + newStr + content.substring(m.end),
+                strategy
+            )
+        }
+
+        // ── Strategy 1: Exact match ──
+        run {
+            val idx = content.indexOf(oldStr)
+            if (idx >= 0) {
+                val lastIdx = content.lastIndexOf(oldStr)
+                if (idx == lastIdx) return applyMatch(Match(idx, idx + oldStr.length), "exact match")
+                return ReplaceResult(content, "ambiguous") // signal ambiguous to caller
+            }
+        }
+
         val contentLines = content.lines()
-        val oldLines = oldText.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val searchLines = oldStr.lines().toMutableList()
+        if (searchLines.lastOrNull() == "") searchLines.removeAt(searchLines.lastIndex)
 
-        if (oldLines.isNotEmpty()) {
-            // Sliding window search over file lines
-            val windowSize = oldLines.size
-            var matchStart = -1
-            var matchEnd = -1
-            var matches = 0
-            for (i in 0..contentLines.size - windowSize) {
-                var isMatch = true
-                for (j in oldLines.indices) {
-                    if (contentLines[i + j].trim() != oldLines[j]) {
-                        isMatch = false
+        // Helper: convert line range to char range
+        fun lineRange(startLine: Int, endLineInclusive: Int): Match {
+            var s = 0
+            for (k in 0 until startLine) s += contentLines[k].length + 1
+            var e = s
+            for (k in startLine..endLineInclusive) {
+                e += contentLines[k].length
+                if (k < endLineInclusive) e += 1
+            }
+            return Match(s, e)
+        }
+
+        // ── Strategy 2: Line-trimmed match (ignore leading/trailing whitespace per line) ──
+        run {
+            val matches = mutableListOf<Match>()
+            if (searchLines.isNotEmpty()) {
+                for (i in 0..contentLines.size - searchLines.size) {
+                    var ok = true
+                    for (j in searchLines.indices) {
+                        if (contentLines[i + j].trim() != searchLines[j].trim()) { ok = false; break }
+                    }
+                    if (ok) matches.add(lineRange(i, i + searchLines.size - 1))
+                }
+            }
+            if (matches.size == 1) return applyMatch(matches[0], "line-trimmed match")
+        }
+
+        // ── Strategy 3: Block-anchor + Levenshtein similarity ──
+        if (searchLines.size >= 3) run {
+            val firstTrimmed = searchLines.first().trim()
+            val lastTrimmed = searchLines.last().trim()
+            data class Candidate(val startLine: Int, val endLine: Int)
+            val candidates = mutableListOf<Candidate>()
+            for (i in contentLines.indices) {
+                if (contentLines[i].trim() != firstTrimmed) continue
+                for (j in i + 2 until contentLines.size) {
+                    if (contentLines[j].trim() == lastTrimmed) {
+                        candidates.add(Candidate(i, j))
                         break
                     }
                 }
-                if (isMatch) {
-                    matchStart = i
-                    matchEnd = i + windowSize
-                    matches++
+            }
+            if (candidates.size == 1) {
+                val c = candidates[0]
+                // Single candidate: accept with relaxed threshold (anchor match is strong signal)
+                return applyMatch(lineRange(c.startLine, c.endLine), "block-anchor match (single candidate)")
+            }
+            if (candidates.size > 1) {
+                // Pick best by Levenshtein similarity of middle lines
+                var bestCandidate: Candidate? = null
+                var bestSim = -1.0
+                for (c in candidates) {
+                    val actualSize = c.endLine - c.startLine + 1
+                    val middleCount = minOf(searchLines.size - 2, actualSize - 2)
+                    if (middleCount <= 0) { if (bestSim < 1.0) { bestSim = 1.0; bestCandidate = c }; continue }
+                    var simSum = 0.0
+                    for (j in 1..middleCount) {
+                        val a = contentLines[c.startLine + j].trim()
+                        val b = searchLines[j].trim()
+                        val maxLen = maxOf(a.length, b.length)
+                        simSum += if (maxLen == 0) 1.0 else 1.0 - levenshteinDistance(a, b).toDouble() / maxLen
+                    }
+                    val avgSim = simSum / middleCount
+                    if (avgSim > bestSim) { bestSim = avgSim; bestCandidate = c }
+                }
+                if (bestCandidate != null && bestSim >= 0.3) {
+                    return applyMatch(lineRange(bestCandidate.startLine, bestCandidate.endLine),
+                        "block-anchor match (similarity=${String.format("%.2f", bestSim)})")
                 }
             }
-            if (matches == 1) {
-                snapshotFile(appId, relativePath)
-                val newLines = contentLines.toMutableList()
-                val replacement = newText.lines()
-                for (k in matchStart until matchEnd) newLines.removeAt(matchStart)
-                newLines.addAll(matchStart, replacement)
-                file.writeText(newLines.joinToString("\n"))
-                return "Replaced in: $relativePath (lines ${matchStart + 1}-$matchEnd, normalized match)"
-            }
-            if (matches > 1) return "Error: text matches $matches locations in $relativePath, be more specific"
         }
 
-        // 3. Not found — provide helpful context
-        val firstLine = oldText.lines().firstOrNull()?.trim() ?: ""
-        val hint = if (firstLine.isNotEmpty()) {
-            val lineNum = contentLines.indexOfFirst { it.trim().contains(firstLine) }
-            if (lineNum >= 0) " Hint: similar text found near line ${lineNum + 1}. Use read_workspace_file to re-read the file, or use replace_lines with line numbers."
-            else " The first line of old_text was not found anywhere. Re-read the file with read_workspace_file and try again."
-        } else ""
-        return "Error: text not found in $relativePath.$hint"
+        // ── Strategy 4: Whitespace-normalized (collapse all whitespace) ──
+        run {
+            val norm = { s: String -> s.replace(Regex("\\s+"), " ").trim() }
+            val normFind = norm(oldStr)
+            val matches = mutableListOf<Match>()
+            // Single-line match
+            for (i in contentLines.indices) {
+                if (norm(contentLines[i]) == normFind) {
+                    val s = contentLines.take(i).sumOf { it.length + 1 }
+                    matches.add(Match(s, s + contentLines[i].length))
+                }
+            }
+            // Multi-line block match
+            if (searchLines.size > 1 && matches.isEmpty()) {
+                for (i in 0..contentLines.size - searchLines.size) {
+                    val block = contentLines.subList(i, i + searchLines.size).joinToString("\n")
+                    if (norm(block) == normFind) matches.add(lineRange(i, i + searchLines.size - 1))
+                }
+            }
+            if (matches.size == 1) return applyMatch(matches[0], "whitespace-normalized match")
+        }
+
+        // ── Strategy 5: Indentation-flexible (remove common indent, compare) ──
+        run {
+            val removeIndent = { lines: List<String> ->
+                val nonEmpty = lines.filter { it.isNotBlank() }
+                val minIndent = nonEmpty.minOfOrNull { it.length - it.trimStart().length } ?: 0
+                lines.map { if (it.isBlank()) it else it.substring(minOf(minIndent, it.length)) }.joinToString("\n")
+            }
+            val normFind = removeIndent(searchLines)
+            val matches = mutableListOf<Match>()
+            for (i in 0..contentLines.size - searchLines.size) {
+                val block = contentLines.subList(i, i + searchLines.size)
+                if (removeIndent(block) == normFind) matches.add(lineRange(i, i + searchLines.size - 1))
+            }
+            if (matches.size == 1) return applyMatch(matches[0], "indentation-flexible match")
+        }
+
+        // ── Strategy 6: Escape-normalized (unescape \\n, \\t, etc.) ──
+        run {
+            val unescape = { s: String ->
+                s.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r")
+                    .replace("\\'", "'").replace("\\\"", "\"").replace("\\\\", "\\")
+            }
+            val unescaped = unescape(oldStr)
+            if (unescaped != oldStr) {
+                val idx = content.indexOf(unescaped)
+                if (idx >= 0 && content.lastIndexOf(unescaped) == idx) {
+                    return applyMatch(Match(idx, idx + unescaped.length), "escape-normalized match")
+                }
+            }
+        }
+
+        // ── Strategy 7: Trimmed-boundary (trim leading/trailing whitespace of entire block) ──
+        run {
+            val trimmed = oldStr.trim()
+            if (trimmed != oldStr && trimmed.isNotEmpty()) {
+                val idx = content.indexOf(trimmed)
+                if (idx >= 0 && content.lastIndexOf(trimmed) == idx) {
+                    return applyMatch(Match(idx, idx + trimmed.length), "trimmed-boundary match")
+                }
+                // Also try block-level trim match
+                val matches = mutableListOf<Match>()
+                for (i in 0..contentLines.size - searchLines.size) {
+                    val block = contentLines.subList(i, i + searchLines.size).joinToString("\n")
+                    if (block.trim() == trimmed) matches.add(lineRange(i, i + searchLines.size - 1))
+                }
+                if (matches.size == 1) return applyMatch(matches[0], "trimmed-boundary block match")
+            }
+        }
+
+        // ── Strategy 8: Context-aware (first+last line anchors + 50% middle similarity) ──
+        if (searchLines.size >= 3) run {
+            val firstTrimmed = searchLines.first().trim()
+            val lastTrimmed = searchLines.last().trim()
+            for (i in contentLines.indices) {
+                if (contentLines[i].trim() != firstTrimmed) continue
+                for (j in i + 2 until contentLines.size) {
+                    if (contentLines[j].trim() != lastTrimmed) continue
+                    val blockLines = contentLines.subList(i, j + 1)
+                    if (blockLines.size == searchLines.size) {
+                        var matching = 0; var total = 0
+                        for (k in 1 until blockLines.size - 1) {
+                            val bl = blockLines[k].trim(); val sl = searchLines[k].trim()
+                            if (bl.isNotEmpty() || sl.isNotEmpty()) { total++; if (bl == sl) matching++ }
+                        }
+                        if (total == 0 || matching.toDouble() / total >= 0.5) {
+                            return applyMatch(lineRange(i, j), "context-aware match (${matching}/${total} lines)")
+                        }
+                    }
+                    break
+                }
+            }
+        }
+
+        // ── Strategy 9: Multi-occurrence (if replaceAll semantics could help, still require unique) ──
+        // This is a last resort — find all exact matches and report
+        run {
+            var idx = content.indexOf(oldStr)
+            var count = 0
+            while (idx >= 0) { count++; idx = content.indexOf(oldStr, idx + oldStr.length) }
+            if (count > 1) return ReplaceResult(content, "ambiguous") // signal ambiguous to caller
+        }
+
+        return null // not found by any strategy
+    }
+
+    /** Levenshtein distance between two strings. */
+    private fun levenshteinDistance(a: String, b: String): Int {
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in 0..a.length) dp[i][0] = i
+        for (j in 0..b.length) dp[0][j] = j
+        for (i in 1..a.length) {
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                dp[i][j] = minOf(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+            }
+        }
+        return dp[a.length][b.length]
     }
 
     /** Replace lines by line number range (1-indexed, inclusive). Auto-snapshots before modifying. */
@@ -158,16 +425,26 @@ class WorkspaceManager(private val context: Context) {
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
         if (!file.exists()) return "Error: file not found: $relativePath"
-        val lines = file.readText().lines().toMutableList()
-        if (startLine < 1 || startLine > lines.size) return "Error: start_line $startLine out of range (1-${lines.size})"
-        val s = startLine - 1
-        val e = endLine.coerceAtMost(lines.size)
-        if (e < startLine) return "Error: end_line must be >= start_line"
-        snapshotFile(appId, relativePath)
-        for (k in s until e) lines.removeAt(s)
-        lines.addAll(s, newContent.lines())
-        file.writeText(lines.joinToString("\n"))
-        return "Replaced lines $startLine-$e with ${newContent.lines().size} new lines in $relativePath"
+        // Read-before-write assertion
+        if (!wasFileRead(appId, relativePath)) {
+            return "Error: you must read_workspace_file('$relativePath') before editing it. " +
+                "This ensures line numbers are accurate."
+        }
+        synchronized(lockFor(appId, relativePath)) {
+            val raw = file.readText()
+            val lineEnding = if (raw.contains("\r\n")) "\r\n" else "\n"
+            val lines = raw.replace("\r\n", "\n").lines().toMutableList()
+            if (startLine < 1 || startLine > lines.size) return "Error: start_line $startLine out of range (1-${lines.size})"
+            val s = startLine - 1
+            val e = endLine.coerceAtMost(lines.size)
+            if (e < startLine) return "Error: end_line must be >= start_line"
+            snapshotFile(appId, relativePath)
+            for (k in s until e) lines.removeAt(s)
+            lines.addAll(s, newContent.lines())
+            val output = lines.joinToString("\n").let { if (lineEnding == "\r\n") it.replace("\n", "\r\n") else it }
+            file.writeText(output)
+            return "Replaced lines $startLine-$e with ${newContent.lines().size} new lines in $relativePath"
+        }
     }
 
     /** Create a directory (and any parent directories). */
@@ -304,7 +581,13 @@ class WorkspaceManager(private val context: Context) {
             fileList.put(obj)
         }
 
-        val json = org.json.JSONObject()
+        // Merge with existing manifest to preserve custom fields
+        val manifestFile = File(root, "APP_INFO.json")
+        val json = if (manifestFile.exists()) {
+            try { org.json.JSONObject(manifestFile.readText()) } catch (_: Exception) { org.json.JSONObject() }
+        } else {
+            org.json.JSONObject()
+        }
         json.put("name", appName)
         json.put("version", version)
         json.put("description", description)
@@ -316,7 +599,7 @@ class WorkspaceManager(private val context: Context) {
         if (usedBridgeApis.isNotEmpty()) json.put("nativeBridgeApis", org.json.JSONArray(usedBridgeApis))
         if (usedModules.isNotEmpty()) json.put("modules", org.json.JSONArray(usedModules))
 
-        File(root, "APP_INFO.json").writeText(json.toString(2))
+        manifestFile.writeText(json.toString(2))
     }
 
     /**
@@ -352,6 +635,20 @@ class WorkspaceManager(private val context: Context) {
     fun deleteWorkspace(appId: String) {
         val dir = getWorkspaceDir(appId)
         if (dir.exists()) dir.deleteRecursively()
+    }
+
+    /** Clean up workspace directories that have no files (empty dirs from aborted generations). */
+    fun cleanupStaleWorkspaces() {
+        val root = workspacesRoot
+        if (!root.exists()) return
+        root.listFiles()?.forEach { dir ->
+            if (dir.isDirectory) {
+                val userFiles = dir.listFiles()?.filter { it.name !in META_FILES } ?: emptyList()
+                if (userFiles.isEmpty()) {
+                    dir.deleteRecursively()
+                }
+            }
+        }
     }
 
     // ── Coding Tools ──
@@ -444,12 +741,22 @@ class WorkspaceManager(private val context: Context) {
         val file = resolveSecure(appId, relativePath)
             ?: return "Error: invalid path: $relativePath"
         if (!file.exists()) return "Error: file not found: $relativePath"
-        val lines = file.readText().lines().toMutableList()
-        val insertAt = (lineNumber - 1).coerceIn(0, lines.size)
-        val newLines = content.lines()
-        lines.addAll(insertAt, newLines)
-        file.writeText(lines.joinToString("\n"))
-        return "Inserted ${newLines.size} line(s) at line $lineNumber in $relativePath (total now ${lines.size} lines)"
+        if (!wasFileRead(appId, relativePath)) {
+            return "Error: you must read_workspace_file('$relativePath') before editing it. " +
+                "This ensures line numbers are accurate."
+        }
+        synchronized(lockFor(appId, relativePath)) {
+            val raw = file.readText()
+            val lineEnding = if (raw.contains("\r\n")) "\r\n" else "\n"
+            val lines = raw.replace("\r\n", "\n").lines().toMutableList()
+            val insertAt = (lineNumber - 1).coerceIn(0, lines.size)
+            val newLines = content.lines()
+            snapshotFile(appId, relativePath)
+            lines.addAll(insertAt, newLines)
+            val output = lines.joinToString("\n").let { if (lineEnding == "\r\n") it.replace("\n", "\r\n") else it }
+            file.writeText(output)
+            return "Inserted ${newLines.size} line(s) at line $lineNumber in $relativePath (total now ${lines.size} lines)"
+        }
     }
 
     /** Get file metadata: size, line count, modification time. */
@@ -718,31 +1025,25 @@ class WorkspaceManager(private val context: Context) {
             }
 
         // Use a proper tag tokenizer that handles quoted attributes containing '>'
-        // and multi-line tags (attributes spanning multiple lines).
-        // Run on the entire stripped content, then compute line numbers from offsets.
-        // The regex: match open/close/self-closing tags. Inside quoted attrs, '>' is allowed.
-        // [^>"'] matches any char (including newlines via DOT_MATCHES_ALL equivalent) except >, ", '
-        val tagTokenRegex = Regex("""<(/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s(?:[^>"']|"[^"]*"|'[^']*')*?)?\s*/?>""")
-        // Pre-compute line start offsets for efficient line number lookup
-        val lineBreaks = mutableListOf(0) // offset of each line start
+        // Process full content (not line-by-line) so multi-line tags with Vue directives are matched correctly
+        val tagTokenRegex = Regex("""</?([a-zA-Z][a-zA-Z0-9-]*)(?:\s+(?:[^>"']*|"[^"]*"|'[^']*')*)?\s*/?>|</([a-zA-Z][a-zA-Z0-9-]*)\s*>""")
+
+        // Pre-compute line start offsets for O(log n) line number lookup
+        val lineStartOffsets = mutableListOf(0)
         for ((i, ch) in strippedContent.withIndex()) {
-            if (ch == '\n') lineBreaks.add(i + 1)
+            if (ch == '\n') lineStartOffsets.add(i + 1)
         }
         fun offsetToLine(offset: Int): Int {
-            var lo = 0; var hi = lineBreaks.size - 1
-            while (lo < hi) {
-                val mid = (lo + hi + 1) / 2
-                if (lineBreaks[mid] <= offset) lo = mid else hi = mid - 1
-            }
-            return lo + 1 // 1-based
+            val idx = lineStartOffsets.binarySearch(offset)
+            return if (idx >= 0) idx + 1 else -(idx + 1)  // 1-based line number
         }
 
         for (match in tagTokenRegex.findAll(strippedContent)) {
             val raw = match.value
             val lineNum = offsetToLine(match.range.first)
-            val isClose = match.groupValues[1] == "/"
-            val tag = match.groupValues[2].lowercase()
-            if (isClose) {
+            if (raw.startsWith("</")) {
+                // Close tag
+                val tag = (match.groupValues[1].ifBlank { match.groupValues[2] }).lowercase()
                 val lastIdx = tagStack.indexOfLast { it.first == tag }
                 if (lastIdx >= 0) {
                     tagStack.removeAt(lastIdx)
@@ -750,6 +1051,8 @@ class WorkspaceManager(private val context: Context) {
                     issues.add("[错误] 第${lineNum}行: 多余的关闭标签 </$tag>")
                 }
             } else {
+                // Open tag (or self-closing)
+                val tag = match.groupValues[1].lowercase()
                 if (tag !in selfClosing && !raw.endsWith("/>")) {
                     tagStack.add(tag to lineNum)
                 }
@@ -769,7 +1072,9 @@ class WorkspaceManager(private val context: Context) {
                     issues.add("[警告] 第${lineIdx + 1}行: <script> src为空")
                 } else if (!src.startsWith("http") && !src.startsWith("//") && !src.startsWith("data:")) {
                     val refFile = resolveSecure(appId, src)
-                    if (refFile != null && !refFile.exists()) {
+                    if (refFile == null) {
+                        issues.add("[警告] 第${lineIdx + 1}行: 可疑的脚本引用路径: $src")
+                    } else if (!refFile.exists()) {
                         issues.add("[警告] 第${lineIdx + 1}行: 引用的文件不存在: $src")
                     }
                 }
@@ -807,7 +1112,9 @@ class WorkspaceManager(private val context: Context) {
                     issues.add("[警告] 第${lineIdx + 1}行: <link> href为空")
                 } else if (!href.startsWith("http") && !href.startsWith("//") && !href.startsWith("data:")) {
                     val refFile = resolveSecure(appId, href)
-                    if (refFile != null && !refFile.exists()) {
+                    if (refFile == null) {
+                        issues.add("[警告] 第${lineIdx + 1}行: 可疑的样式引用路径: $href")
+                    } else if (!refFile.exists()) {
                         issues.add("[警告] 第${lineIdx + 1}行: 引用的样式文件不存在: $href")
                     }
                 }
@@ -821,25 +1128,75 @@ class WorkspaceManager(private val context: Context) {
         }
     }
 
-    // ── Security ──
+    /** Validate a standalone JS file for syntax issues (bracket balance, common errors). */
+    fun validateJs(appId: String, relativePath: String): String {
+        if (relativePath.isBlank()) return "Error: path cannot be empty"
+        val file = resolveSecure(appId, relativePath)
+            ?: return "Error: invalid path: $relativePath"
+        if (!file.exists()) return "Error: file not found: $relativePath"
+        val content = file.readText()
+        val issues = mutableListOf<String>()
 
-    /**
-     * Delete workspace directories that haven't been modified in [maxAgeDays] days
-     * and trim snapshots in each remaining workspace to [maxSnapshotsPerFile].
-     * Call from a background thread (e.g. ViewModel init).
-     */
-    fun cleanupStaleWorkspaces(maxAgeDays: Int = 30) {
-        try {
-            val cutoff = System.currentTimeMillis() - maxAgeDays.toLong() * 24 * 60 * 60 * 1000
-            val dirs = workspacesRoot.listFiles()?.filter { it.isDirectory } ?: return
-            for (dir in dirs) {
-                val newest = dir.walkTopDown().filter { it.isFile }.maxOfOrNull { it.lastModified() } ?: 0L
-                if (newest < cutoff) {
-                    dir.deleteRecursively()
-                }
+        // Strip strings and comments to avoid false positives
+        val stripped = content
+            .replace(Regex("//[^\n]*"), "")                                      // single-line comments
+            .replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")    // multi-line comments
+            .replace(Regex("\"\"\"[\\s\\S]*?\"\"\""), "")             // triple-quoted (rare)
+            .replace(Regex("\"(?:[^\"\\\\]|\\\\.)*\""), "")            // double-quoted strings
+            .replace(Regex("'(?:[^'\\\\]|\\\\.)*'"), "")                    // single-quoted strings
+            .replace(Regex("`(?:[^`\\\\]|\\\\.)*`", RegexOption.DOT_MATCHES_ALL), "") // template literals
+
+        // 1. Bracket balance
+        var braces = 0; var parens = 0; var brackets = 0
+        for (ch in stripped) {
+            when (ch) { '{' -> braces++; '}' -> braces--; '(' -> parens++; ')' -> parens--; '[' -> brackets++; ']' -> brackets-- }
+        }
+        if (braces != 0) issues.add("[错误] 花括号 {} 不匹配 (差${kotlin.math.abs(braces)}个)")
+        if (parens != 0) issues.add("[错误] 圆括号 () 不匹配 (差${kotlin.math.abs(parens)}个)")
+        if (brackets != 0) issues.add("[错误] 方括号 [] 不匹配 (差${kotlin.math.abs(brackets)}个)")
+
+        // 2. Common mistake patterns
+        val lines = content.lines()
+        for ((idx, line) in lines.withIndex()) {
+            val trimmed = line.trim()
+            // Detect placeholder/truncated code
+            if (trimmed.matches(Regex("//\\s*(\\.{3}|…|其余|rest of|remaining|todo|TODO).*"))) {
+                issues.add("[警告] 第${idx + 1}行: 可能是未完成的占位代码: ${trimmed.take(60)}")
             }
-        } catch (_: Exception) { /* best-effort */ }
+        }
+
+        return if (issues.isEmpty()) {
+            "✓ $relativePath JS校验通过"
+        } else {
+            "$relativePath 发现 ${issues.size} 个问题:\n" + issues.joinToString("\n")
+        }
     }
+
+    /** Validate a standalone CSS file for basic syntax issues (bracket balance). */
+    fun validateCss(appId: String, relativePath: String): String {
+        if (relativePath.isBlank()) return "Error: path cannot be empty"
+        val file = resolveSecure(appId, relativePath)
+            ?: return "Error: invalid path: $relativePath"
+        if (!file.exists()) return "Error: file not found: $relativePath"
+        val content = file.readText()
+        val issues = mutableListOf<String>()
+
+        // Strip comments
+        val stripped = content.replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), "")
+
+        // Bracket balance
+        var braces = 0
+        for (ch in stripped) { when (ch) { '{' -> braces++; '}' -> braces-- } }
+        if (braces != 0) issues.add("[错误] 花括号 {} 不匹配 (差${kotlin.math.abs(braces)}个)")
+
+        return if (issues.isEmpty()) {
+            "✓ $relativePath CSS校验通过"
+        } else {
+            "$relativePath 发现 ${issues.size} 个问题:\n" + issues.joinToString("\n")
+        }
+    }
+
+    // ── Security ──
 
     /** Sanitize app ID to prevent directory traversal. */
     private fun sanitizeId(id: String): String {

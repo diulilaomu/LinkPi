@@ -7,11 +7,16 @@ import java.io.File
 
 class MiniAppStorage(private val context: Context) {
 
+    companion object {
+        private const val SCHEMA_VERSION = 1
+    }
+
     private val appsDir: File
         get() = File(context.filesDir, "miniapps").also { it.mkdirs() }
 
     fun save(app: MiniApp) {
         val json = JSONObject().apply {
+            put("schemaVersion", SCHEMA_VERSION)
             put("id", app.id)
             put("name", app.name)
             put("description", app.description)
@@ -19,8 +24,17 @@ class MiniAppStorage(private val context: Context) {
             put("createdAt", app.createdAt)
             put("isWorkspaceApp", app.isWorkspaceApp)
             put("entryFile", app.entryFile)
+            put("icon", app.icon)
         }
-        File(appsDir, "${app.id}.json").writeText(json.toString())
+        // Atomic write: write to .tmp then rename to avoid partial-write corruption
+        val target = File(appsDir, "${app.id}.json")
+        val tmp = File(appsDir, "${app.id}.json.tmp")
+        try {
+            tmp.writeText(json.toString())
+            tmp.renameTo(target)
+        } finally {
+            if (tmp.exists()) tmp.delete()
+        }
     }
 
     fun loadAll(): List<MiniApp> {
@@ -52,7 +66,8 @@ class MiniAppStorage(private val context: Context) {
                 htmlContent = json.optString("htmlContent", ""),
                 createdAt = json.optLong("createdAt", 0),
                 isWorkspaceApp = json.optBoolean("isWorkspaceApp", false),
-                entryFile = json.optString("entryFile", "index.html")
+                entryFile = json.optString("entryFile", "index.html"),
+                icon = json.optString("icon", "")
             )
         } catch (_: Exception) {
             null

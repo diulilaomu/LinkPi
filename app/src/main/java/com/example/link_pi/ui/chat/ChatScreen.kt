@@ -101,7 +101,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.link_pi.agent.AgentStep
-import com.example.link_pi.agent.StepType
 import com.example.link_pi.data.model.Attachment
 import com.example.link_pi.data.model.ChatMessage
 import com.example.link_pi.data.model.MiniApp
@@ -110,6 +109,7 @@ import com.example.link_pi.ui.miniapp.exportMiniApp
 import com.example.link_pi.ui.workbench.AppCreationCard
 import com.example.link_pi.ui.common.RichInputBar
 import com.example.link_pi.ui.common.RichInputBarStyle
+import com.example.link_pi.ui.common.AgentStepsPanel
 import com.example.link_pi.ui.theme.*
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -146,7 +146,11 @@ fun ChatScreen(
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            val lastIndex = listState.layoutInfo.totalItemsCount - 1
+            if (lastIndex >= 0) {
+                // scrollOffset 用大值确保滚到 item 底部
+                listState.scrollToItem(lastIndex, scrollOffset = Int.MAX_VALUE)
+            }
         }
     }
 
@@ -157,9 +161,9 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(agentSteps.size, isLoading) {
+    LaunchedEffect(agentSteps.size, agentSteps.lastOrNull()?.description, isLoading) {
         if (isLoading && listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
         }
     }
 
@@ -176,7 +180,9 @@ fun ChatScreen(
     // 键盘弹起时自动滚动到底部，避免输入区域遮挡消息
     LaunchedEffect(imeBottomDp) {
         if (imeBottomDp > navBarBottomDp && listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            val lastIndex = listState.layoutInfo.totalItemsCount - 1
+            // scrollOffset 用大值确保滚到 item 底部而非顶部
+            listState.scrollToItem(lastIndex, scrollOffset = Int.MAX_VALUE)
         }
     }
 
@@ -244,12 +250,18 @@ fun ChatScreen(
                 }
             }
             if (isLoading) {
-                if (agentSteps.isNotEmpty()) {
-                    item { AgentStepsCard(agentSteps) }
-                } else {
+                if (agentSteps.isEmpty()) {
                     item { LoadingIndicator() }
                 }
             }
+        }
+
+        // Agent steps panel (above input bar, like SSH command panel)
+        if (agentSteps.isNotEmpty()) {
+            AgentStepsPanel(
+                steps = agentSteps,
+                isLoading = isLoading
+            )
         }
 
         // Error banner
@@ -463,12 +475,6 @@ private fun MessageBubble(
             }
             }
         } else {
-            // Agent steps (collapsed)
-            if (message.agentSteps.isNotEmpty()) {
-                AgentStepsTimeline(steps = message.agentSteps)
-                Spacer(modifier = Modifier.height(6.dp))
-            }
-
             // Deep thinking block (collapsed)
             if (message.thinkingContent.isNotBlank()) {
                 ThinkingBlock(content = message.thinkingContent)
@@ -854,179 +860,7 @@ private fun ThinkingBlock(content: String) {
     }
 }
 
-// ── Agent Steps Timeline ──
 
-@Composable
-private fun AgentStepsTimeline(steps: List<AgentStep>) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Surface(
-        onClick = { expanded = !expanded },
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "思考过程",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                Text(
-                    text = "${steps.size} 步 ${if (expanded) "▲" else "▼"}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                )
-            }
-
-            AnimatedVisibility(
-                visible = expanded,
-                enter = expandVertically(),
-                exit = shrinkVertically()
-            ) {
-                Column(modifier = Modifier.padding(top = 8.dp)) {
-                    steps.forEachIndexed { idx, step ->
-                        AgentStepRow(step, isLast = idx == steps.size - 1)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AgentStepRow(step: AgentStep, isLast: Boolean) {
-    val accentColor = when (step.type) {
-        StepType.THINKING -> MaterialTheme.colorScheme.tertiary
-        StepType.TOOL_CALL -> MaterialTheme.colorScheme.primary
-        StepType.TOOL_RESULT -> MaterialTheme.colorScheme.secondary
-        StepType.FINAL_RESPONSE -> MaterialTheme.colorScheme.primary
-    }
-    val isLongDetail = step.detail.length > 100
-    var expanded by remember { mutableStateOf(false) }
-    val clipboardManager = LocalClipboardManager.current
-
-    Row(modifier = Modifier.padding(vertical = 2.dp)) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.width(20.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(accentColor.copy(alpha = 0.7f))
-            )
-            if (!isLast) {
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(if (expanded) 200.dp else 24.dp)
-                        .background(accentColor.copy(alpha = 0.2f))
-                )
-            }
-        }
-
-        Column(modifier = Modifier.padding(start = 4.dp).fillMaxWidth()) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = step.description,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = accentColor,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false)
-                )
-                if (isLongDetail) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Surface(
-                        onClick = { expanded = !expanded },
-                        shape = RoundedCornerShape(4.dp),
-                        color = accentColor.copy(alpha = 0.1f)
-                    ) {
-                        Text(
-                            text = if (expanded) "收起 ▲" else "${step.detail.length}字 ▼",
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                            color = accentColor.copy(alpha = 0.6f),
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                        )
-                    }
-                }
-            }
-            if (step.detail.isNotBlank()) {
-                if (!isLongDetail) {
-                    // Short detail: show inline
-                    Text(
-                        text = step.detail,
-                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                } else if (!expanded) {
-                    // Long detail collapsed: show preview
-                    Text(
-                        text = step.detail.take(80) + "...",
-                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                } else {
-                    // Long detail expanded: full text + copy button
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Surface(
-                        onClick = { clipboardManager.setText(AnnotatedString(step.detail)) },
-                        shape = RoundedCornerShape(4.dp),
-                        color = accentColor.copy(alpha = 0.1f)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Icon(
-                                Icons.Outlined.ContentCopy,
-                                contentDescription = "复制",
-                                modifier = Modifier.size(10.dp),
-                                tint = accentColor
-                            )
-                            Spacer(modifier = Modifier.width(3.dp))
-                            Text(
-                                text = "复制全文",
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                color = accentColor
-                            )
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 300.dp)
-                            .background(
-                                MaterialTheme.colorScheme.surfaceContainerLowest,
-                                RoundedCornerShape(6.dp)
-                            )
-                            .padding(6.dp)
-                    ) {
-                        Text(
-                            text = step.detail,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontSize = 10.sp,
-                                lineHeight = 14.sp,
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                            )
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
 
 // ── Mini App Action Bar ──
 
@@ -1108,54 +942,6 @@ private fun LoadingIndicator() {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
         )
-    }
-}
-
-@Composable
-private fun AgentStepsCard(steps: List<AgentStep>) {
-    val scrollState = rememberScrollState()
-
-    LaunchedEffect(steps.size) {
-        scrollState.animateScrollTo(scrollState.maxValue)
-    }
-
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(12.dp),
-                    strokeWidth = 1.5.dp
-                )
-                Text(
-                    text = "正在工作...",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            HorizontalDivider(
-                modifier = Modifier.padding(vertical = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-            )
-            Column(
-                modifier = Modifier
-                    .heightIn(max = 300.dp)
-                    .verticalScroll(scrollState)
-                    .animateContentSize()
-            ) {
-                steps.forEachIndexed { idx, step ->
-                    AgentStepRow(step, isLast = idx == steps.size - 1)
-                }
-            }
-        }
     }
 }
 

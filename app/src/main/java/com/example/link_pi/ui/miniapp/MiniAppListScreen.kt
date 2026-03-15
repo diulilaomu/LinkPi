@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -44,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppStorage
+import com.example.link_pi.miniapp.WebViewPool
 import com.example.link_pi.workspace.WorkspaceManager
 import java.io.File
 import java.io.FileOutputStream
@@ -56,11 +58,13 @@ import java.util.zip.ZipOutputStream
 @Composable
 fun MiniAppListScreen(
     storage: MiniAppStorage,
+    webViewPool: WebViewPool,
     onRunApp: (MiniApp) -> Unit
 ) {
     val context = LocalContext.current
     var apps by remember { mutableStateOf(storage.loadAll()) }
     var showDeleteDialog by remember { mutableStateOf<MiniApp?>(null) }
+    var showPinDialog by remember { mutableStateOf<MiniApp?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         if (apps.isEmpty()) {
@@ -91,6 +95,7 @@ fun MiniAppListScreen(
                     MiniAppListItem(
                         app = app,
                         onRun = { onRunApp(app) },
+                        onPin = { showPinDialog = app },
                         onExport = { exportMiniApp(context, app) },
                         onDelete = { showDeleteDialog = app }
                     )
@@ -107,6 +112,7 @@ fun MiniAppListScreen(
             confirmButton = {
                 TextButton(onClick = {
                     storage.delete(app.id)
+                    webViewPool.destroy(app.id)
                     if (app.isWorkspaceApp) {
                         WorkspaceManager(context).deleteWorkspace(app.id)
                     }
@@ -121,12 +127,27 @@ fun MiniAppListScreen(
             }
         )
     }
+
+    showPinDialog?.let { app ->
+        PinToHomeDialog(
+            appId = app.id,
+            defaultName = app.name,
+            defaultIcon = app.icon,
+            onDismiss = { showPinDialog = null },
+            onSave = { name, iconPath ->
+                val updated = app.copy(name = name, icon = iconPath)
+                storage.save(updated)
+                apps = storage.loadAll()
+            }
+        )
+    }
 }
 
 @Composable
 private fun MiniAppListItem(
     app: MiniApp,
     onRun: () -> Unit,
+    onPin: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -178,6 +199,14 @@ private fun MiniAppListItem(
                 )
             }
             Row {
+                IconButton(onClick = onPin, modifier = Modifier.size(36.dp)) {
+                    Icon(
+                        Icons.Outlined.PushPin,
+                        contentDescription = "固定到桌面",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 IconButton(onClick = onExport, modifier = Modifier.size(36.dp)) {
                     Icon(
                         Icons.Outlined.Share,

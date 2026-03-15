@@ -23,20 +23,37 @@ object FileBlockParser {
     data class ParsedFile(val path: String, val content: String)
 
     /**
-     * Extract all `<file path="...">…</file>` blocks from the response.
+     * Extract file blocks from the response.
+     * Supports two formats:
+     *   1. Primary:  <<<FILE:path>>>...<<<END_FILE>>>  (robust, no content collision)
+     *   2. Legacy:   <file path="...">...</file>       (backward compat)
      *
      * @return List of parsed files, or empty list if no valid blocks found.
      */
     fun parseFiles(response: String): List<ParsedFile> {
         val files = mutableListOf<ParsedFile>()
 
-        // Primary format: <file path="...">content</file>
+        // Primary format: <<<FILE:path>>>content<<<END_FILE>>>
+        val robustRegex = Regex("""<<<FILE:([^>]+)>>>([\s\S]*?)<<<END_FILE>>>""")
+        for (match in robustRegex.findAll(response)) {
+            val path = match.groupValues[1].trim()
+            val content = match.groupValues[2]
+                .removePrefix("\n")
+                .removeSuffix("\n")
+            if (path.isNotBlank() && content.isNotBlank()) {
+                files.add(ParsedFile(sanitizePath(path), content))
+            }
+        }
+
+        if (files.isNotEmpty()) return files
+
+        // Legacy format: <file path="...">content</file>
         val fileBlockRegex = Regex("""<file\s+path\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)</file>""")
         for (match in fileBlockRegex.findAll(response)) {
             val path = match.groupValues[1].trim()
             val content = match.groupValues[2]
-                .removePrefix("\n")   // Strip leading newline after tag
-                .removeSuffix("\n")   // Strip trailing newline before closing tag
+                .removePrefix("\n")
+                .removeSuffix("\n")
             if (path.isNotBlank() && content.isNotBlank()) {
                 files.add(ParsedFile(sanitizePath(path), content))
             }

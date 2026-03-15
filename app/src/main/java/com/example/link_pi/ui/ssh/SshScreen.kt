@@ -114,6 +114,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.example.link_pi.agent.SshOrchestrator.CommandStatus
+import com.example.link_pi.agent.SshManager
+import com.example.link_pi.data.SavedServer
 import com.example.link_pi.ui.common.MarkdownText
 import com.example.link_pi.ui.common.RichInputBar
 import com.example.link_pi.ui.common.RichInputBarStyle
@@ -133,17 +135,28 @@ fun SshScreen(
     val sessionId by viewModel.sessionId.collectAsState()
     val isManualMode by viewModel.isManualMode.collectAsState()
 
-    // 系统返回 — 手动模式下需连按两次才能退出
+    // 系统返回/边缘滑动 — 双击弹出会话切换器
     var lastBackTime by remember { mutableLongStateOf(0L) }
+    var showSwitcherTop by remember { mutableStateOf(false) }
     val context = LocalContext.current
     BackHandler(enabled = page == "ssh") {
         val now = System.currentTimeMillis()
         if (now - lastBackTime < 2000) {
-            onBack()
+            showSwitcherTop = true
         } else {
             lastBackTime = now
-            Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "再滑一次打开会话列表", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    // Session Switcher triggered by system back / edge swipe
+    if (showSwitcherTop) {
+        SessionSwitcherSheet(
+            viewModel = viewModel,
+            currentSessionId = sessionId,
+            onDismiss = { showSwitcherTop = false },
+            onExit = { showSwitcherTop = false; onBack() }
+        )
     }
 
     val isSessionDropped by viewModel.isSessionDropped.collectAsState()
@@ -229,8 +242,9 @@ private fun SshTerminalContent(
     }
 
     val context = LocalContext.current
-    // Double horizontal-swipe to go back
+    // Double horizontal-swipe to show session switcher
     var lastSwipeTime by remember { mutableLongStateOf(0L) }
+    var showSwitcher by remember { mutableStateOf(false) }
 
     val density = LocalDensity.current
     val imeBottomDp = with(density) { WindowInsets.ime.getBottom(density).toDp() }
@@ -240,14 +254,14 @@ private fun SshTerminalContent(
     // Auto-scroll
     LaunchedEffect(messages.size) {
         if (listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, scrollOffset = Int.MAX_VALUE)
         }
     }
 
     // 键盘弹起时自动滚动到底部
     LaunchedEffect(imeBottomDp) {
         if (imeBottomDp > navBarBottomDp && listState.layoutInfo.totalItemsCount > 0) {
-            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, scrollOffset = Int.MAX_VALUE)
         }
     }
 
@@ -262,11 +276,11 @@ private fun SshTerminalContent(
                     if (kotlin.math.abs(dragAmount) > 30f) {
                         val now = System.currentTimeMillis()
                         if (now - lastSwipeTime < 2000) {
-                            onBack()
+                            showSwitcher = true
                         } else {
                             lastSwipeTime = now
                             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "再滑一次打开会话列表", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -369,6 +383,263 @@ private fun SshTerminalContent(
                 )
             }
         )
+    }
+
+    // Session Switcher Dialog
+    if (showSwitcher) {
+        SessionSwitcherSheet(
+            viewModel = viewModel,
+            currentSessionId = viewModel.sessionId.collectAsState().value,
+            onDismiss = { showSwitcher = false },
+            onExit = { showSwitcher = false; onBack() }
+        )
+    }
+}
+
+// ═══════════════════════════════════════
+//  Session Switcher Dialog
+// ═══════════════════════════════════════
+
+@Composable
+private fun SessionSwitcherSheet(
+    viewModel: SshViewModel,
+    currentSessionId: String?,
+    onDismiss: () -> Unit,
+    onExit: () -> Unit
+) {
+    val savedServers by viewModel.savedServers.collectAsState()
+    val switcherConnecting by viewModel.switcherConnecting.collectAsState()
+    val switcherError by viewModel.switcherError.collectAsState()
+
+    // Refresh data on open
+    LaunchedEffect(Unit) { viewModel.refreshSavedServers() }
+    val activeSessions = remember { viewModel.fetchActiveSessions() }
+
+    // Auto-dismiss when session switches (after connectAndSwitch succeeds)
+    val liveSessionId by viewModel.sessionId.collectAsState()
+    LaunchedEffect(liveSessionId) {
+        if (liveSessionId != null && liveSessionId != currentSessionId && switcherConnecting == null) {
+            onDismiss()
+        }
+    }
+    // Map sessionId → SshSessionInfo for quick lookup
+    val activeSessionMap = remember(activeSessions) {
+        activeSessions.associateBy { "${it.host}:${it.port}:${it.username}" }
+    }
+    val activeSessionIds = remember(activeSessions) { activeSessions.map { it.sessionId }.toSet() }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = TermSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, TermBorder),
+            modifier = Modifier
+                .fillMaxWidth(0.92f)
+                .heightIn(max = 480.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.Terminal,
+                        contentDescription = null,
+                        tint = TermGreen,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "SSH 会话",
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TermGreen)
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Surface(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color.Transparent
+                    ) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "关闭",
+                            tint = TermDim,
+                            modifier = Modifier.size(20.dp).padding(2.dp)
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Error message
+                switcherError?.let { err ->
+                    Text(
+                        text = err,
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, color = TermRed),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(TermRed.copy(alpha = 0.1f), RoundedCornerShape(8.dp))
+                            .padding(8.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                // Server list
+                Column(
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    if (savedServers.isEmpty() && activeSessions.isEmpty()) {
+                        Text(
+                            "暂无已保存的服务器",
+                            style = TextStyle(fontFamily = MonoFont, fontSize = 12.sp, color = TermDim),
+                            modifier = Modifier.padding(vertical = 16.dp).fillMaxWidth(),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+
+                    // Active sessions (not from saved servers)
+                    val savedServerKeys = savedServers.map { "${it.host}:${it.port}" }.toSet()
+                    val orphanSessions = activeSessions.filter { "${it.host}:${it.port}" !in savedServerKeys }
+                    if (orphanSessions.isNotEmpty()) {
+                        Text(
+                            "活跃会话",
+                            style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TermYellow)
+                        )
+                        orphanSessions.forEach { session ->
+                            SessionServerRow(
+                                label = "${session.username}@${session.host}:${session.port}",
+                                isConnected = true,
+                                isCurrent = session.sessionId == currentSessionId,
+                                isConnecting = false,
+                                onClick = {
+                                    if (session.sessionId != currentSessionId) {
+                                        viewModel.switchToSession(session.sessionId)
+                                        onDismiss()
+                                    }
+                                }
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                    }
+
+                    // Saved servers
+                    if (savedServers.isNotEmpty()) {
+                        Text(
+                            "服务器列表",
+                            style = TextStyle(fontFamily = MonoFont, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TermYellow)
+                        )
+                        savedServers.forEach { server ->
+                            val key = "${server.host}:${server.port}:${server.credentialName}"
+                            // Find if this server has an active session
+                            val matchedSession = activeSessions.find {
+                                it.host == server.host && it.port == server.port
+                            }
+                            val isConn = matchedSession != null
+                            val isCurr = matchedSession?.sessionId == currentSessionId && isConn
+                            val isLoading = switcherConnecting == server.id
+
+                            SessionServerRow(
+                                label = if (server.name.isNotBlank()) server.name else "${server.host}:${server.port}",
+                                subtitle = if (server.name.isNotBlank()) "${server.credentialName}@${server.host}:${server.port}" else server.credentialName.ifBlank { null },
+                                isConnected = isConn,
+                                isCurrent = isCurr,
+                                isConnecting = isLoading,
+                                onClick = {
+                                    if (isCurr) return@SessionServerRow
+                                    if (matchedSession != null) {
+                                        viewModel.switchToSession(matchedSession.sessionId)
+                                        onDismiss()
+                                    } else {
+                                        viewModel.connectAndSwitch(server)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Exit button
+                Surface(
+                    onClick = onExit,
+                    shape = RoundedCornerShape(12.dp),
+                    color = TermRed.copy(alpha = 0.12f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "返回上一级",
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermRed, fontWeight = FontWeight.Medium),
+                        modifier = Modifier.padding(vertical = 12.dp).fillMaxWidth(),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionServerRow(
+    label: String,
+    subtitle: String? = null,
+    isConnected: Boolean,
+    isCurrent: Boolean,
+    isConnecting: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(12.dp),
+        color = if (isCurrent) TermGreen.copy(alpha = 0.1f) else TermCard,
+        border = if (isCurrent) androidx.compose.foundation.BorderStroke(1.dp, TermGreen.copy(alpha = 0.4f)) else null
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 13.sp, color = TermText),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (subtitle != null) {
+                    Text(
+                        text = subtitle,
+                        style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermDim),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            if (isConnecting) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    strokeWidth = 1.5.dp,
+                    color = TermYellow
+                )
+            } else if (isCurrent) {
+                Text(
+                    "当前",
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermGreen, fontWeight = FontWeight.Bold)
+                )
+            } else if (isConnected) {
+                Text(
+                    "已连接",
+                    style = TextStyle(fontFamily = MonoFont, fontSize = 10.sp, color = TermCyan)
+                )
+            }
+        }
     }
 }
 
@@ -1176,8 +1447,9 @@ private fun ManualTerminalContent(
     var activeModifiers by remember { mutableStateOf(setOf<String>()) }
     val context = LocalContext.current
 
-    // Double horizontal-swipe to go back
+    // Double horizontal-swipe to show session switcher
     var lastSwipeTime by remember { mutableLongStateOf(0L) }
+    var showSwitcher by remember { mutableStateOf(false) }
 
     // Cursor blink: blink in alternate screen (vim/nano), steady in normal terminal
     val isAltScreen by viewModel.isAlternateScreen.collectAsState()
@@ -1205,6 +1477,7 @@ private fun ManualTerminalContent(
         viewModel.renderStatusOutput(cursorVisible)
     }
     val scrollState = rememberScrollState()
+    val hScrollState = rememberScrollState()
 
     // Padding chars — always kept in hidden field so backspace has something to delete
     val pad = "\u200B\u200B\u200B\u200B" // 4 zero-width spaces
@@ -1219,11 +1492,15 @@ private fun ManualTerminalContent(
     val textMeasurer = rememberTextMeasurer()
     val baseFontSizeSp = 8f
     val termPaddingPx = with(density) { 6.dp.toPx() * 2 }
-    val charWidthPx = remember(density) {
+
+    // Dynamic font size: use smaller font in alt screen (TUI mode)
+    val effectiveFontSizeSp = if (isAltScreen) 7f else baseFontSizeSp
+
+    val charWidthPx = remember(density, effectiveFontSizeSp) {
         val sample = 80
         textMeasurer.measure(
             "M".repeat(sample),
-            style = TextStyle(fontFamily = MonoFont, fontSize = baseFontSizeSp.sp),
+            style = TextStyle(fontFamily = MonoFont, fontSize = effectiveFontSizeSp.sp),
             maxLines = 1
         ).size.width.toFloat() / sample
     }
@@ -1234,9 +1511,6 @@ private fun ManualTerminalContent(
         } else 80
     }
     val termRows = 40
-
-    // Dynamic font size: use smaller font in alt screen (TUI mode)
-    val effectiveFontSizeSp = if (isAltScreen) 7f else baseFontSizeSp
 
     LaunchedEffect(termCols) {
         viewModel.updateTerminalSize(termCols, termRows)
@@ -1327,11 +1601,11 @@ private fun ManualTerminalContent(
                     if (kotlin.math.abs(dragAmount) > 30f) {
                         val now = System.currentTimeMillis()
                         if (now - lastSwipeTime < 2000) {
-                            onBack()
+                            showSwitcher = true
                         } else {
                             lastSwipeTime = now
                             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                Toast.makeText(context, "再滑一次返回上一级", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(context, "再滑一次打开会话列表", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -1362,6 +1636,7 @@ private fun ManualTerminalContent(
                 .weight(1f)
                 .fillMaxWidth()
                 .onSizeChanged { containerWidthPx = it.width }
+                .horizontalScroll(hScrollState)
                 .verticalScroll(scrollState)
                 .pointerInput(Unit) {
                     detectTapGestures {
@@ -1481,6 +1756,7 @@ private fun ManualTerminalContent(
                     text = displayStatus,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(hScrollState)
                         .padding(horizontal = 6.dp, vertical = 4.dp),
                     style = TextStyle(fontFamily = MonoFont, fontSize = statusFontSizeSp.sp, color = TermText),
                     maxLines = 2
@@ -1510,6 +1786,16 @@ private fun ManualTerminalContent(
                     keyboardController?.show()
                 }
             }
+        )
+    }
+
+    // Session Switcher Dialog
+    if (showSwitcher) {
+        SessionSwitcherSheet(
+            viewModel = viewModel,
+            currentSessionId = viewModel.sessionId.collectAsState().value,
+            onDismiss = { showSwitcher = false },
+            onExit = { showSwitcher = false; onBack() }
         )
     }
 }

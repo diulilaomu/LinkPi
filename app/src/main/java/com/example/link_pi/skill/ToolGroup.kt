@@ -6,15 +6,15 @@ package com.example.link_pi.skill
  */
 enum class ToolGroup {
     CORE,          // get_current_time, calculate, show_toast
-    MEMORY,        // memory_save, memory_search, memory_list, memory_delete, memory_update
-    APP_CREATE,    // create_file, write_file, append_file, create_directory
-    APP_READ,      // read_workspace_file, list_workspace_files, file_info
-    APP_EDIT,      // replace_in_file, replace_lines, insert_lines, rename_file, copy_file, delete_workspace_file, delete_directory
+    MEMORY,        // memory_save, memory_search, memory_list, memory_delete, memory_update, save_data, load_data
+    APP_CREATE,    // write_file
+    APP_READ,      // read_file, list_files, read_truncated_output
+    APP_EDIT,      // edit_file, rename_file, delete_path, undo_file
     APP_NAVIGATE,  // list_saved_apps, open_app_workspace
-    CODING,        // grep_file, grep_workspace
+    CODING,        // search, validate, get_runtime_errors, diff_file, inspect_workspace, read_plan
     DEVICE,        // get_device_info, get_battery_level, get_location, vibrate, write_clipboard
-    NETWORK,       // fetch_url, save_data, load_data
-    MODULE,        // create_module, add_module_endpoint, remove_module_endpoint, call_module, list_modules, update_module, delete_module
+    NETWORK,       // fetch_url, web_search
+    MODULE,        // create_module, start_module, stop_module, call_module, list_modules, update_module, delete_module, write_module_script, read_module_script, test_module_script, list_module_templates
     SSH            // ssh_connect, ssh_exec, ssh_disconnect, ssh_upload, ssh_download, ssh_list_remote, ssh_list_sessions, ssh_port_forward
 }
 
@@ -60,40 +60,35 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     "calculate" to ToolGroup.CORE,
     "show_toast" to ToolGroup.CORE,
     "launch_workbench" to ToolGroup.CORE,
-    // MEMORY
+    // MEMORY (includes persistent key-value storage)
     "memory_save" to ToolGroup.MEMORY,
     "memory_search" to ToolGroup.MEMORY,
     "memory_list" to ToolGroup.MEMORY,
     "memory_delete" to ToolGroup.MEMORY,
     "memory_update" to ToolGroup.MEMORY,
+    "save_data" to ToolGroup.MEMORY,
+    "load_data" to ToolGroup.MEMORY,
     // APP_CREATE
-    "create_file" to ToolGroup.APP_CREATE,
     "write_file" to ToolGroup.APP_CREATE,
-    "append_file" to ToolGroup.APP_CREATE,
-    "create_directory" to ToolGroup.APP_CREATE,
     // APP_READ
-    "read_workspace_file" to ToolGroup.APP_READ,
-    "list_workspace_files" to ToolGroup.APP_READ,
-    "file_info" to ToolGroup.APP_READ,
-    "list_snapshots" to ToolGroup.APP_READ,
+    "read_file" to ToolGroup.APP_READ,
+    "list_files" to ToolGroup.APP_READ,
+    "read_truncated_output" to ToolGroup.APP_READ,
     // APP_EDIT
-    "replace_in_file" to ToolGroup.APP_EDIT,
-    "replace_lines" to ToolGroup.APP_EDIT,
-    "insert_lines" to ToolGroup.APP_EDIT,
+    "edit_file" to ToolGroup.APP_EDIT,
     "rename_file" to ToolGroup.APP_EDIT,
-    "copy_file" to ToolGroup.APP_EDIT,
-    "delete_workspace_file" to ToolGroup.APP_EDIT,
-    "delete_directory" to ToolGroup.APP_EDIT,
+    "delete_path" to ToolGroup.APP_EDIT,
     "undo_file" to ToolGroup.APP_EDIT,
     // APP_NAVIGATE
     "list_saved_apps" to ToolGroup.APP_NAVIGATE,
     "open_app_workspace" to ToolGroup.APP_NAVIGATE,
     // CODING
-    "grep_file" to ToolGroup.CODING,
-    "grep_workspace" to ToolGroup.CODING,
+    "search" to ToolGroup.CODING,
+    "validate" to ToolGroup.CODING,
     "get_runtime_errors" to ToolGroup.CODING,
-    "validate_html" to ToolGroup.CODING,
     "diff_file" to ToolGroup.CODING,
+    "inspect_workspace" to ToolGroup.CODING,
+    "read_plan" to ToolGroup.CODING,
     // DEVICE
     "get_device_info" to ToolGroup.DEVICE,
     "get_battery_level" to ToolGroup.DEVICE,
@@ -103,16 +98,18 @@ val TOOL_GROUP_MAP: Map<String, ToolGroup> = mapOf(
     // NETWORK
     "fetch_url" to ToolGroup.NETWORK,
     "web_search" to ToolGroup.NETWORK,
-    "save_data" to ToolGroup.NETWORK,
-    "load_data" to ToolGroup.NETWORK,
     // MODULE
     "create_module" to ToolGroup.MODULE,
-    "add_module_endpoint" to ToolGroup.MODULE,
-    "remove_module_endpoint" to ToolGroup.MODULE,
+    "start_module" to ToolGroup.MODULE,
+    "stop_module" to ToolGroup.MODULE,
     "call_module" to ToolGroup.MODULE,
     "list_modules" to ToolGroup.MODULE,
     "update_module" to ToolGroup.MODULE,
     "delete_module" to ToolGroup.MODULE,
+    "write_module_script" to ToolGroup.MODULE,
+    "read_module_script" to ToolGroup.MODULE,
+    "test_module_script" to ToolGroup.MODULE,
+    "list_module_templates" to ToolGroup.MODULE,
     // SSH
     "ssh_connect" to ToolGroup.SSH,
     "ssh_exec" to ToolGroup.SSH,
@@ -137,7 +134,7 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         UserIntent.CREATE_APP -> {
             when (phase) {
                 AgentPhase.PLANNING -> {
-                    groups.add(ToolGroup.MEMORY)
+                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.MODULE))
                 }
                 AgentPhase.GENERATION -> {
                     groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING, ToolGroup.NETWORK))
@@ -151,7 +148,7 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
             when (phase) {
                 AgentPhase.PLANNING -> {
                     // Planning is read-only: explore workspace, read code, plan modifications
-                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_READ, ToolGroup.APP_NAVIGATE, ToolGroup.CODING))
+                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_READ, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.MODULE))
                 }
                 AgentPhase.GENERATION -> {
                     groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.NETWORK))

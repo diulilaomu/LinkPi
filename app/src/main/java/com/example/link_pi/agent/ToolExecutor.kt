@@ -21,6 +21,7 @@ import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -33,48 +34,74 @@ class ToolExecutor(
     val miniAppStorage: MiniAppStorage,
     val workspaceManager: WorkspaceManager = WorkspaceManager(context)
 ) {
+    /** Application context for headless operations (e.g., HeadlessWebViewRunner). */
+    val appContext: Context get() = context.applicationContext
     /** Current workspace app ID — set before orchestrator runs. */
     var currentAppId: String = "default"
     /** Hint from conversation context — latest relevant app ID for auto-resolve. */
     var latestAppHint: String? = null
     /** Cached result of last list_saved_apps call for auto-resolve. */
-    private var lastListedApps: List<MiniApp> = emptyList()
+
     /** Long-term memory storage. */
     val memoryStorage = MemoryStorage(context)
     /** Dynamic module storage. */
     val moduleStorage = ModuleStorage(context)
+    /** Python sandbox runner for module scripts. */
+    val pythonRunner = PythonRunner(context).also { moduleStorage.pythonRunner = it }
+    /** Module service lifecycle manager. */
+    val moduleService = ModuleService(moduleStorage)
     /** SSH session manager. */
     val sshManager = SshManager.getInstance(context)
     /** Pending workbench redirect — set when AI calls launch_workbench. */
     var pendingWorkbenchRedirect: WorkbenchRedirect? = null
+    /** Plan store — caches planning artifacts for cross-phase retrieval via read_plan tool. */
+    val planStore = mutableMapOf<String, String>()
     /** Progress callback for long-running tools (SSH exec). Set by orchestrator. */
     var toolProgressCallback: ((AgentStep) -> Unit)? = null
-    private val httpClient get() = ModuleStorage.httpClient
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
+    /** Get an HTTPS client that trusts user-approved certificates. */
+    private fun getSecureHttpClient(): OkHttpClient {
+        val store = com.example.link_pi.data.TrustedCertStore(context)
+        val sslCtx = com.example.link_pi.data.TrustedCertStore.buildSSLContext(store)
+        val tm = com.example.link_pi.data.TrustedCertStore.buildTrustManager(store)
+        return if (sslCtx != null && tm != null) {
+            httpClient.newBuilder()
+                .sslSocketFactory(sslCtx.socketFactory, tm)
+                .hostnameVerifier(com.example.link_pi.data.TrustedCertStore.buildHostnameVerifier(store))
+                .build()
+        } else httpClient
+    }
 
     /** Common tool name aliases the AI may hallucinate. */
     private val TOOL_ALIASES = mapOf(
-        "read_file" to "read_workspace_file",
-        "readFile" to "read_workspace_file",
-        "read" to "read_workspace_file",
-        "list_files" to "list_workspace_files",
-        "listFiles" to "list_workspace_files",
-        "delete_file" to "delete_workspace_file",
-        "deleteFile" to "delete_workspace_file",
-        "edit_file" to "replace_in_file",
-        "search" to "grep_workspace",
-        "grep" to "grep_workspace",
+        // camelCase aliases
+        "readFile" to "read_file",
+        "listFiles" to "list_files",
+        "deleteFile" to "delete_path",
+        "editFile" to "edit_file",
+        // Legacy names → kept in when() block for argument compatibility
+        // Memory aliases
         "search_memory" to "memory_search",
         "save_memory" to "memory_save",
         "list_memory" to "memory_list",
         "delete_memory" to "memory_delete",
         "update_memory" to "memory_update",
+        // App aliases
         "list_apps" to "list_saved_apps",
         "open_workspace" to "open_app_workspace",
+        // SSH aliases
         "sshConnect" to "ssh_connect",
         "sshExec" to "ssh_exec",
         "ssh_execute" to "ssh_exec",
         "sshDisconnect" to "ssh_disconnect",
         "ssh_close" to "ssh_disconnect",
+        // Workbench aliases
         "create_app" to "launch_workbench",
         "open_workbench" to "launch_workbench",
     )
@@ -142,28 +169,15 @@ class ToolExecutor(
 
         // ── File System Tools (Workspace) ──
         ToolDef(
-            "create_file", "在工作空间中创建新文件（如html, css, js等）",
+            "write_file", "写入文件（不存在则自动创建，含父目录）。默认覆写；mode=append 追加到末尾",
             listOf(
                 ToolParam("path", "string", "相对路径，如 index.html 或 css/style.css"),
-                ToolParam("content", "string", "文件内容")
+                ToolParam("content", "string", "文件内容"),
+                ToolParam("mode", "string", "写入模式: overwrite（默认）/ append", required = false)
             )
         ),
         ToolDef(
-            "write_file", "写入/覆盖文件内容（文件不存在则创建）",
-            listOf(
-                ToolParam("path", "string", "相对路径"),
-                ToolParam("content", "string", "文件完整内容")
-            )
-        ),
-        ToolDef(
-            "append_file", "在文件末尾追加内容",
-            listOf(
-                ToolParam("path", "string", "相对路径"),
-                ToolParam("content", "string", "要追加的内容")
-            )
-        ),
-        ToolDef(
-            "read_workspace_file", "读取工作空间中的文件内容（带行号）",
+            "read_file", "读取工作空间中的文件内容（带行号）",
             listOf(
                 ToolParam("path", "string", "相对路径"),
                 ToolParam("start_line", "number", "起始行号（1开始），不填则从头读", required = false),
@@ -171,50 +185,42 @@ class ToolExecutor(
             )
         ),
         ToolDef(
-            "replace_in_file", "定位替换文件中的指定文本（支持空白容错匹配）",
+            "edit_file", "编辑文件。三种模式：(1) command=replace_text 定位替换文本，需 old_text+new_text（支持9级级联匹配）；(2) command=replace_lines 按行号替换，需 start_line+end_line+new_content；(3) command=insert 在指定行前插入，需 line+content。⚠ 必须先 read_file 读取文件后使用",
             listOf(
                 ToolParam("path", "string", "相对路径"),
-                ToolParam("old_text", "string", "要替换的原文本"),
-                ToolParam("new_text", "string", "替换后的新文本")
+                ToolParam("command", "string", "操作: replace_text / replace_lines / insert"),
+                ToolParam("old_text", "string", "要替换的原文本（replace_text 时必需）", required = false),
+                ToolParam("new_text", "string", "替换后的新文本（replace_text 时必需）", required = false),
+                ToolParam("start_line", "number", "起始行号（replace_lines 时必需，1开始，含）", required = false),
+                ToolParam("end_line", "number", "结束行号（replace_lines 时必需，含）", required = false),
+                ToolParam("new_content", "string", "新内容（replace_lines/insert 时）", required = false),
+                ToolParam("line", "number", "插入位置行号（insert 时必需，1开始）", required = false)
             )
         ),
         ToolDef(
-            "replace_lines", "按行号范围替换文件内容（当replace_in_file匹配失败时使用）",
+            "list_files", "列出工作空间中的文件和文件夹。设 detail=true 获取详细信息（大小、行数等）",
             listOf(
-                ToolParam("path", "string", "相对路径"),
-                ToolParam("start_line", "number", "起始行号（1开始，含）"),
-                ToolParam("end_line", "number", "结束行号（含）"),
-                ToolParam("new_content", "string", "替换后的新内容")
+                ToolParam("path", "string", "相对路径，留空列出根目录", required = false),
+                ToolParam("detail", "boolean", "true=返回详细信息（大小、行数、修改时间），默认false", required = false)
             )
         ),
         ToolDef(
-            "create_directory", "创建文件夹（支持多级目录）",
-            listOf(ToolParam("path", "string", "相对路径，如 css 或 src/components"))
-        ),
-        ToolDef(
-            "list_workspace_files", "列出工作空间中的文件和文件夹",
-            listOf(ToolParam("path", "string", "相对路径，留空列出根目录", required = false))
-        ),
-        ToolDef(
-            "delete_workspace_file", "删除工作空间中的文件",
+            "delete_path", "删除文件或文件夹（文件夹会递归删除所有内容）",
             listOf(ToolParam("path", "string", "相对路径"))
         ),
         ToolDef(
-            "delete_directory", "递归删除文件夹及其所有内容",
-            listOf(ToolParam("path", "string", "相对路径，如 old_folder 或 src/unused"))
-        ),
-        ToolDef(
-            "rename_file", "重命名或移动文件/文件夹",
+            "rename_file", "重命名/移动文件或文件夹。设 copy=true 为复制而非移动",
             listOf(
                 ToolParam("old_path", "string", "原路径"),
-                ToolParam("new_path", "string", "新路径")
+                ToolParam("new_path", "string", "新路径"),
+                ToolParam("copy", "boolean", "true=复制 false=移动（默认）", required = false)
             )
         ),
         ToolDef(
-            "copy_file", "复制文件到新路径",
+            "undo_file", "撤销文件的最近一次修改。设 list_only=true 仅列出可用快照",
             listOf(
-                ToolParam("source", "string", "源文件路径"),
-                ToolParam("destination", "string", "目标文件路径")
+                ToolParam("path", "string", "文件相对路径"),
+                ToolParam("list_only", "boolean", "true=仅列出快照版本 false=执行撤销（默认）", required = false)
             )
         ),
         ToolDef(
@@ -248,6 +254,10 @@ class ToolExecutor(
             listOf(ToolParam("id", "string", "记忆ID"))
         ),
         ToolDef(
+            "read_truncated_output", "读取之前被截断的工具输出的完整内容。当工具输出过长被截断时，截断提示会包含缓存文件名",
+            listOf(ToolParam("filename", "string", "缓存文件名（从截断提示中获取）"))
+        ),
+        ToolDef(
             "memory_update", "更新一条已有记忆的内容或标签",
             listOf(
                 ToolParam("id", "string", "记忆ID"),
@@ -256,51 +266,41 @@ class ToolExecutor(
             )
         ),
 
-        // ── Module Tools (Dynamic API Services) ──
+        // ── Module Tools (Python Service Modules) ──
         ToolDef(
-            "create_module", "创建一个新的API模块（后台服务）。模块可封装HTTP/TCP/UDP接口，供后续调用。TCP/UDP端点支持hex编码收发二进制数据",
+            "create_module", "创建一个新的 Python 服务模块。可从内置模板（http_server/tcp_server/udp_server）快速创建，或手动定义",
             listOf(
-                ToolParam("name", "string", "模块名称（如 httpbin, weather, dlt645_meter）"),
+                ToolParam("name", "string", "模块名称"),
                 ToolParam("description", "string", "模块描述"),
-                ToolParam("base_url", "string", "基础URL或主机地址（HTTP如 https://httpbin.org，TCP/UDP如 tcp://192.168.1.100）"),
-                ToolParam("protocol", "string", "通信协议: HTTP（默认）、TCP、UDP", required = false),
-                ToolParam("allow_private_network", "string", "是否允许访问局域网/私有IP地址（true/false，默认false）。DTU网关、本地设备等场景需设为true", required = false),
-                ToolParam("default_headers", "string", "默认请求头JSON（如 {\"Authorization\":\"Bearer xxx\"}）", required = false),
-                ToolParam("endpoints", "string", "端点列表JSON数组，格式: [{\"name\":\"read_meter\",\"path\":\"/api\",\"method\":\"GET\",\"port\":8600,\"encoding\":\"hex\",\"body_template\":\"68 ...\",\"description\":\"读电表\"}]。encoding可选utf8(默认)或hex(二进制协议)", required = false),
-                ToolParam("instructions", "string", "模块使用说明（详细的接口文档、参数格式、调用示例、注意事项等）。AI 在 list_modules 时可阅读此字段了解如何使用模块", required = false)
+                ToolParam("service_type", "string", "服务类型: HTTP（默认）、TCP、UDP", required = false),
+                ToolParam("template", "string", "从内置模板创建: http_server, tcp_server, udp_server", required = false),
+                ToolParam("port", "string", "默认端口号（0=自动分配 8100-8199）", required = false),
+                ToolParam("main_script", "string", "入口脚本文件名（默认 server.py）", required = false),
+                ToolParam("instructions", "string", "模块使用说明", required = false)
             )
         ),
         ToolDef(
-            "add_module_endpoint", "给已有模块添加一个新的API端点",
-            listOf(
-                ToolParam("module_id", "string", "模块ID（从list_modules获取）"),
-                ToolParam("name", "string", "端点名称（如 post_data, read_meter）"),
-                ToolParam("path", "string", "请求路径（HTTP如 /post，TCP/UDP可留空。支持{{param}}占位符）"),
-                ToolParam("method", "string", "HTTP方法: GET/POST/PUT/DELETE", required = false),
-                ToolParam("port", "string", "TCP/UDP端口号", required = false),
-                ToolParam("encoding", "string", "数据编码: utf8（默认，文本）或 hex（十六进制，二进制协议）", required = false),
-                ToolParam("headers", "string", "额外请求头JSON", required = false),
-                ToolParam("body_template", "string", "请求体模板，支持{{param}}占位符。hex模式下为十六进制字符串如 '68 AA AA AA AA AA AA 68'", required = false),
-                ToolParam("description", "string", "端点描述", required = false)
-            )
-        ),
-        ToolDef(
-            "remove_module_endpoint", "从模块中移除一个端点",
-            listOf(
-                ToolParam("module_id", "string", "模块ID"),
-                ToolParam("endpoint_name", "string", "要移除的端点名称")
-            )
-        ),
-        ToolDef(
-            "call_module", "调用模块的某个端点执行HTTP/TCP/UDP请求",
+            "start_module", "启动模块的 Python 服务脚本",
             listOf(
                 ToolParam("module", "string", "模块名称或ID"),
-                ToolParam("endpoint", "string", "端点名称"),
-                ToolParam("params", "string", "参数JSON对象，填充{{param}}占位符", required = false)
+                ToolParam("port", "string", "指定端口号（可选，默认自动分配）", required = false)
             )
         ),
         ToolDef(
-            "list_modules", "列出所有已创建的模块及其端点",
+            "stop_module", "停止运行中的模块服务",
+            listOf(ToolParam("module", "string", "模块名称或ID"))
+        ),
+        ToolDef(
+            "call_module", "调用运行中的 HTTP 模块服务的某个路径",
+            listOf(
+                ToolParam("module", "string", "模块名称或ID"),
+                ToolParam("path", "string", "HTTP 路径（如 /hello、/process）"),
+                ToolParam("method", "string", "HTTP 方法: GET/POST/PUT/DELETE，默认 GET", required = false),
+                ToolParam("body", "string", "请求体 JSON（POST/PUT 时使用）", required = false)
+            )
+        ),
+        ToolDef(
+            "list_modules", "列出所有模块及其运行状态",
             emptyList()
         ),
         ToolDef(
@@ -309,64 +309,73 @@ class ToolExecutor(
                 ToolParam("module_id", "string", "模块ID"),
                 ToolParam("name", "string", "新名称", required = false),
                 ToolParam("description", "string", "新描述", required = false),
-                ToolParam("base_url", "string", "新基础URL", required = false),
-                ToolParam("default_headers", "string", "新默认请求头JSON", required = false),
                 ToolParam("instructions", "string", "新的使用说明", required = false)
             )
         ),
         ToolDef(
-            "delete_module", "删除一个模块",
+            "delete_module", "删除一个模块（会先停止服务）",
             listOf(ToolParam("module_id", "string", "模块ID"))
+        ),
+        ToolDef(
+            "write_module_script", "写入或更新模块包内的Python脚本文件",
+            listOf(
+                ToolParam("module_id", "string", "模块ID"),
+                ToolParam("filename", "string", "脚本文件名（如 server.py, utils.py）"),
+                ToolParam("content", "string", "Python脚本内容")
+            )
+        ),
+        ToolDef(
+            "read_module_script", "读取模块包内的Python脚本文件内容",
+            listOf(
+                ToolParam("module_id", "string", "模块ID"),
+                ToolParam("filename", "string", "脚本文件名（留空列出所有脚本）", required = false)
+            )
+        ),
+        ToolDef(
+            "test_module_script", "在沙箱中测试模块Python脚本的指定函数",
+            listOf(
+                ToolParam("module_id", "string", "模块ID"),
+                ToolParam("filename", "string", "脚本文件名"),
+                ToolParam("function", "string", "要测试的函数名"),
+                ToolParam("params", "string", "测试参数JSON对象", required = false)
+            )
+        ),
+        ToolDef(
+            "list_module_templates", "列出可用的内置模块模板（HTTP/TCP/UDP 服务器）",
+            emptyList()
         ),
 
         // ── Coding Tools ──
         ToolDef(
-            "grep_file", "在指定文件中搜索文本或正则表达式，返回匹配行及行号",
-            listOf(
-                ToolParam("path", "string", "相对路径"),
-                ToolParam("pattern", "string", "搜索模式（正则表达式或纯文本）"),
-                ToolParam("is_regex", "boolean", "true=正则匹配 false=纯文本匹配，默认true", required = false)
-            )
-        ),
-        ToolDef(
-            "grep_workspace", "在工作空间所有文件中搜索文本或正则，返回文件名:行号:匹配内容",
+            "search", "搜索文本或正则表达式。指定 path 搜索单个文件，留空搜索整个工作空间",
             listOf(
                 ToolParam("pattern", "string", "搜索模式（正则表达式或纯文本）"),
-                ToolParam("is_regex", "boolean", "true=正则匹配 false=纯文本匹配，默认true", required = false),
-                ToolParam("file_filter", "string", "文件名过滤（如 *.js *.html），留空搜索全部", required = false)
+                ToolParam("path", "string", "限定搜索的文件路径（留空搜索整个工作空间）", required = false),
+                ToolParam("is_regex", "boolean", "true=正则匹配 false=纯文本，默认true", required = false),
+                ToolParam("file_filter", "string", "文件名过滤（如 *.js），仅搜索工作空间时有效", required = false)
             )
         ),
         ToolDef(
-            "insert_lines", "在文件指定行号处插入内容（在该行之前插入，不替换原内容）",
-            listOf(
-                ToolParam("path", "string", "相对路径"),
-                ToolParam("line", "number", "插入位置的行号（1开始，内容插入到该行之前）"),
-                ToolParam("content", "string", "要插入的内容")
-            )
-        ),
-        ToolDef(
-            "file_info", "获取文件或目录的详细信息（大小、行数、字符数、修改时间等）",
-            listOf(ToolParam("path", "string", "相对路径"))
-        ),
-        ToolDef(
-            "get_runtime_errors", "获取当前应用WebView中的JS运行时错误列表，用于诊断和修复",
-            listOf(ToolParam("clear", "boolean", "获取后是否清除错误列表，默认true", required = false))
-        ),
-        ToolDef(
-            "undo_file", "撤销文件的最近一次修改，恢复到上一个快照版本",
-            listOf(ToolParam("path", "string", "要撤销的文件相对路径"))
-        ),
-        ToolDef(
-            "list_snapshots", "列出文件的所有快照版本",
+            "validate", "校验文件语法。自动根据扩展名选择校验器：.html→HTML校验，.js→JS校验，.css→CSS校验",
             listOf(ToolParam("path", "string", "文件相对路径"))
         ),
         ToolDef(
-            "validate_html", "校验HTML文件的语法问题（未闭合标签、缺失doctype、JS语法错误提示等）",
-            listOf(ToolParam("path", "string", "HTML文件相对路径"))
+            "get_runtime_errors", "获取当前应用WebView中的JS运行时错误和console日志，用于诊断和修复",
+            listOf(ToolParam("clear", "boolean", "获取后是否清除，默认true", required = false))
         ),
         ToolDef(
             "diff_file", "对比文件当前内容与最近快照的差异，输出unified diff格式",
             listOf(ToolParam("path", "string", "文件相对路径"))
+        ),
+
+        // ── Workspace Inspection Tools ──
+        ToolDef(
+            "inspect_workspace", "分析工作区架构：文件依赖图、导出函数/类索引、高影响文件、引用完整性检查。不会修改任何文件",
+            emptyList()
+        ),
+        ToolDef(
+            "read_plan", "读取规划阶段缓存的架构蓝图或修改计划。规划完成后系统自动缓存，生成阶段可调此工具获取",
+            listOf(ToolParam("key", "string", "缓存键: architecture（架构蓝图）、modification_plan（修改计划）。留空返回全部", required = false))
         ),
 
         // ── Workbench ──
@@ -471,9 +480,91 @@ class ToolExecutor(
                 "web_search" -> executeWebSearch(args)
                 "get_current_time" -> executeGetTime()
                 "calculate" -> executeCalculate(args)
-                // File system tools
-                "create_file" -> workspaceManager.createFile(currentAppId, args["path"] ?: "", args["content"] ?: "")
-                "write_file" -> workspaceManager.writeFile(currentAppId, args["path"] ?: "", args["content"] ?: "")
+                // ── Merged file system tools ──
+                "write_file" -> {
+                    val path = args["path"] ?: ""
+                    val content = args["content"] ?: ""
+                    when (args["mode"]?.lowercase()) {
+                        "append" -> workspaceManager.appendFile(currentAppId, path, content)
+                        else -> workspaceManager.writeFile(currentAppId, path, content)
+                    }
+                }
+                "read_file" -> {
+                    val startLine = args["start_line"]?.toIntOrNull()
+                    val endLine = args["end_line"]?.toIntOrNull()
+                    if (startLine != null && endLine != null) {
+                        workspaceManager.readFileLines(currentAppId, args["path"] ?: "", startLine, endLine)
+                    } else {
+                        workspaceManager.readFile(currentAppId, args["path"] ?: "")
+                    }
+                }
+                "edit_file" -> {
+                    val path = args["path"] ?: ""
+                    when (args["command"]?.lowercase()) {
+                        "replace_text", "text" -> workspaceManager.replaceInFile(currentAppId, path, args["old_text"] ?: "", args["new_text"] ?: "")
+                        "replace_lines", "lines" -> workspaceManager.replaceLines(currentAppId, path, args["start_line"]?.toIntOrNull() ?: 0, args["end_line"]?.toIntOrNull() ?: 0, args["new_content"] ?: "")
+                        "insert" -> workspaceManager.insertLines(currentAppId, path, args["line"]?.toIntOrNull() ?: 1, args["new_content"] ?: args["content"] ?: "")
+                        else -> "Error: edit_file 的 command 参数必须是 replace_text / replace_lines / insert，收到: ${args["command"]}"
+                    }
+                }
+                "list_files" -> {
+                    val path = args["path"] ?: ""
+                    if (args["detail"]?.toBooleanStrictOrNull() == true) {
+                        workspaceManager.fileInfo(currentAppId, path)
+                    } else {
+                        workspaceManager.listFiles(currentAppId, path)
+                    }
+                }
+                "delete_path" -> {
+                    val path = args["path"] ?: ""
+                    val fileResult = workspaceManager.deleteFile(currentAppId, path)
+                    if (fileResult.startsWith("Error:")) {
+                        val dirResult = workspaceManager.deleteDirectory(currentAppId, path)
+                        if (!dirResult.startsWith("Error:")) dirResult else fileResult
+                    } else fileResult
+                }
+                "rename_file" -> {
+                    if (args["copy"]?.toBooleanStrictOrNull() == true) {
+                        workspaceManager.copyFile(currentAppId, args["old_path"] ?: args["source"] ?: "", args["new_path"] ?: args["destination"] ?: "")
+                    } else {
+                        workspaceManager.renameFile(currentAppId, args["old_path"] ?: "", args["new_path"] ?: "")
+                    }
+                }
+                "undo_file" -> {
+                    val path = args["path"] ?: ""
+                    if (args["list_only"]?.toBooleanStrictOrNull() == true) {
+                        workspaceManager.listSnapshots(currentAppId, path)
+                    } else {
+                        workspaceManager.undoFile(currentAppId, path)
+                    }
+                }
+                "open_app_workspace" -> executeOpenAppWorkspace(args)
+                // ── Merged coding tools ──
+                "search" -> {
+                    val path = args["path"]
+                    val pattern = args["pattern"] ?: ""
+                    val isRegex = args["is_regex"]?.toBooleanStrictOrNull() ?: true
+                    if (!path.isNullOrBlank()) {
+                        workspaceManager.grepFile(currentAppId, path, pattern, isRegex)
+                    } else {
+                        workspaceManager.grepWorkspace(currentAppId, pattern, isRegex, args["file_filter"] ?: "")
+                    }
+                }
+                "validate" -> {
+                    val path = args["path"] ?: ""
+                    when {
+                        path.endsWith(".html", ignoreCase = true) || path.endsWith(".htm", ignoreCase = true) -> workspaceManager.validateHtml(currentAppId, path)
+                        path.endsWith(".css", ignoreCase = true) -> workspaceManager.validateCss(currentAppId, path)
+                        else -> workspaceManager.validateJs(currentAppId, path)
+                    }
+                }
+                "get_runtime_errors" -> executeGetRuntimeErrors(args)
+                "diff_file" -> workspaceManager.diffFile(currentAppId, args["path"] ?: "")
+                // ── Workspace inspection tools ──
+                "inspect_workspace" -> executeInspectWorkspace()
+                "read_plan" -> executeReadPlan(args)
+                // ── Legacy tool names (backward compat for AI hallucinations) ──
+                "create_file" -> workspaceManager.writeFile(currentAppId, args["path"] ?: "", args["content"] ?: "")
                 "append_file" -> workspaceManager.appendFile(currentAppId, args["path"] ?: "", args["content"] ?: "")
                 "read_workspace_file" -> {
                     val startLine = args["start_line"]?.toIntOrNull()
@@ -486,37 +577,43 @@ class ToolExecutor(
                 }
                 "replace_in_file" -> workspaceManager.replaceInFile(currentAppId, args["path"] ?: "", args["old_text"] ?: "", args["new_text"] ?: "")
                 "replace_lines" -> workspaceManager.replaceLines(currentAppId, args["path"] ?: "", args["start_line"]?.toIntOrNull() ?: 0, args["end_line"]?.toIntOrNull() ?: 0, args["new_content"] ?: "")
+                "insert_lines" -> workspaceManager.insertLines(currentAppId, args["path"] ?: "", args["line"]?.toIntOrNull() ?: 1, args["content"] ?: "")
                 "create_directory" -> workspaceManager.createDirectory(currentAppId, args["path"] ?: "")
                 "list_workspace_files" -> workspaceManager.listFiles(currentAppId, args["path"] ?: "")
                 "delete_workspace_file" -> workspaceManager.deleteFile(currentAppId, args["path"] ?: "")
                 "delete_directory" -> workspaceManager.deleteDirectory(currentAppId, args["path"] ?: "")
-                "rename_file" -> workspaceManager.renameFile(currentAppId, args["old_path"] ?: "", args["new_path"] ?: "")
                 "copy_file" -> workspaceManager.copyFile(currentAppId, args["source"] ?: "", args["destination"] ?: "")
-                "open_app_workspace" -> executeOpenAppWorkspace(args)
-                // Coding tools
+                "file_info" -> workspaceManager.fileInfo(currentAppId, args["path"] ?: "")
+                "list_snapshots" -> workspaceManager.listSnapshots(currentAppId, args["path"] ?: "")
                 "grep_file" -> workspaceManager.grepFile(currentAppId, args["path"] ?: "", args["pattern"] ?: "", args["is_regex"]?.toBooleanStrictOrNull() ?: true)
                 "grep_workspace" -> workspaceManager.grepWorkspace(currentAppId, args["pattern"] ?: "", args["is_regex"]?.toBooleanStrictOrNull() ?: true, args["file_filter"] ?: "")
-                "insert_lines" -> workspaceManager.insertLines(currentAppId, args["path"] ?: "", args["line"]?.toIntOrNull() ?: 1, args["content"] ?: "")
-                "file_info" -> workspaceManager.fileInfo(currentAppId, args["path"] ?: "")
-                "get_runtime_errors" -> executeGetRuntimeErrors(args)
-                "undo_file" -> workspaceManager.undoFile(currentAppId, args["path"] ?: "")
-                "list_snapshots" -> workspaceManager.listSnapshots(currentAppId, args["path"] ?: "")
                 "validate_html" -> workspaceManager.validateHtml(currentAppId, args["path"] ?: "")
-                "diff_file" -> workspaceManager.diffFile(currentAppId, args["path"] ?: "")
+                "validate_js" -> {
+                    val path = args["path"] ?: ""
+                    if (path.endsWith(".css", ignoreCase = true)) workspaceManager.validateCss(currentAppId, path) else workspaceManager.validateJs(currentAppId, path)
+                }
                 // Memory tools
                 "memory_save" -> executeMemorySave(args)
                 "memory_search" -> executeMemorySearch(args)
                 "memory_list" -> executeMemoryList()
                 "memory_delete" -> executeMemoryDelete(args)
                 "memory_update" -> executeMemoryUpdate(args)
+                "read_truncated_output" -> {
+                    val filename = args["filename"] ?: return@withContext ToolResult(call.toolName, false, "Error: missing filename parameter")
+                    workspaceManager.readTruncatedOutput(filename) ?: "Error: cached output not found: $filename"
+                }
                 // Module tools
                 "create_module" -> executeCreateModule(args)
-                "add_module_endpoint" -> executeAddEndpoint(args)
-                "remove_module_endpoint" -> executeRemoveEndpoint(args)
+                "start_module" -> executeStartModule(args)
+                "stop_module" -> executeStopModule(args)
                 "call_module" -> executeCallModule(args)
-                "list_modules" -> executeListModules()
+                "list_modules" -> moduleService.statusJson()
                 "update_module" -> executeUpdateModule(args)
                 "delete_module" -> executeDeleteModule(args)
+                "write_module_script" -> executeWriteModuleScript(args)
+                "read_module_script" -> executeReadModuleScript(args)
+                "test_module_script" -> executeTestModuleScript(args)
+                "list_module_templates" -> ModuleFactory.listTemplatesJson()
                 // Workbench
                 "launch_workbench" -> executeLaunchWorkbench(args)
                 // SSH tools
@@ -542,12 +639,16 @@ class ToolExecutor(
     }
 
     private val FILE_TOOL_NAMES = setOf(
-        "create_file", "write_file", "append_file", "read_workspace_file",
+        "write_file", "read_file", "edit_file", "list_files",
+        "delete_path", "rename_file", "undo_file", "search",
+        "validate", "diff_file",
+        // Legacy tool names
+        "create_file", "append_file", "read_workspace_file",
         "replace_in_file", "replace_lines", "create_directory",
         "list_workspace_files", "delete_workspace_file", "delete_directory",
-        "rename_file", "copy_file", "grep_file", "grep_workspace",
-        "insert_lines", "file_info", "undo_file", "list_snapshots",
-        "validate_html", "diff_file"
+        "copy_file", "grep_file", "grep_workspace",
+        "insert_lines", "file_info", "list_snapshots",
+        "validate_html", "validate_js"
     )
 
     /**
@@ -567,10 +668,50 @@ class ToolExecutor(
 
     private fun executeGetRuntimeErrors(args: Map<String, String>): String {
         val errors = RuntimeErrorCollector.getErrors(currentAppId)
+        val logs = RuntimeErrorCollector.getLogs(currentAppId)
         val shouldClear = args["clear"]?.toBooleanStrictOrNull() ?: true
         if (shouldClear) RuntimeErrorCollector.clear(currentAppId)
-        if (errors.isEmpty()) return "没有运行时错误"
-        return "共 ${errors.size} 个运行时错误:\n" + errors.mapIndexed { i, e -> "${i + 1}. $e" }.joinToString("\n")
+
+        val parts = mutableListOf<String>()
+        if (errors.isNotEmpty()) {
+            parts.add("━━ 运行时错误 (共${errors.size}个) ━━\n" +
+                errors.mapIndexed { i, e -> "${i + 1}. $e" }.joinToString("\n"))
+        }
+        if (logs.isNotEmpty()) {
+            parts.add("━━ Console日志 (共${logs.size}条) ━━\n" +
+                logs.takeLast(30).joinToString("\n"))
+        }
+        if (parts.isEmpty()) return "没有运行时错误或日志"
+        return parts.joinToString("\n\n")
+    }
+
+    /** inspect_workspace — 返回架构分析结果（依赖图、导出索引、高影响文件、引用检查） */
+    private fun executeInspectWorkspace(): String {
+        val profile = ArchitectureAnalyzer.analyze(workspaceManager, currentAppId)
+            ?: return "工作区为空或无法分析"
+        val summary = ArchitectureAnalyzer.buildArchitectureSummary(profile, 4000)
+        val missingRefs = ArchitectureAnalyzer.validateReferences(profile)
+        return buildString {
+            append(summary)
+            if (missingRefs.isNotEmpty()) {
+                appendLine()
+                appendLine("**⚠ 引用完整性问题：**")
+                missingRefs.take(10).forEach { appendLine("  - $it") }
+            }
+        }.trimEnd()
+    }
+
+    /** read_plan — 读取规划阶段缓存的架构蓝图或修改计划 */
+    private fun executeReadPlan(args: Map<String, String>): String {
+        if (planStore.isEmpty()) return "当前没有缓存的规划内容。规划阶段完成后才会有缓存。"
+        val key = args["key"]
+        if (key.isNullOrBlank()) {
+            // 返回所有缓存内容
+            return planStore.entries.joinToString("\n\n") { (k, v) ->
+                "### $k\n$v"
+            }
+        }
+        return planStore[key] ?: "未找到键 '$key'。可用的键: ${planStore.keys.joinToString(", ")}"
     }
 
     private fun executeGetDeviceInfo(): String {
@@ -648,21 +789,22 @@ class ToolExecutor(
     private fun executeSaveData(args: Map<String, String>): String {
         val key = args["key"] ?: return "Error: 未提供 key"
         val value = args["value"] ?: return "Error: 未提供 value"
+        val prefKey = "${currentAppId}_$key"
         context.getSharedPreferences("agent_data", Context.MODE_PRIVATE)
-            .edit().putString(key, value).apply()
+            .edit().putString(prefKey, value).apply()
         return "数据已保存: $key"
     }
 
     private fun executeLoadData(args: Map<String, String>): String {
         val key = args["key"] ?: return "Error: 未提供 key"
+        val prefKey = "${currentAppId}_$key"
         val value = context.getSharedPreferences("agent_data", Context.MODE_PRIVATE)
-            .getString(key, null)
+            .getString(prefKey, null)
         return value ?: "(未找到 key: $key 的数据)"
     }
 
     private fun executeListApps(): String {
         val apps = miniAppStorage.loadAll()
-        lastListedApps = apps
         if (apps.isEmpty()) return "没有已保存的应用"
         val arr = JSONArray()
         for (app in apps) {
@@ -687,7 +829,7 @@ class ToolExecutor(
             return "Error: 不允许访问私有/内网地址"
         }
         val request = Request.Builder().url(url).get().build()
-        val response = httpClient.newCall(request).execute()
+        val response = getSecureHttpClient().newCall(request).execute()
         val body = response.body?.string() ?: ""
         // Limit response size
         return if (body.length > 4000) body.take(4000) + "\n...(已截断)" else body
@@ -868,6 +1010,7 @@ $examples
 
     private fun openAppById(app: MiniApp): String {
         currentAppId = app.id
+        workspaceManager.clearReadTracking()  // Reset read-before-write tracking for new workspace
 
         if (app.isWorkspaceApp && workspaceManager.hasFiles(app.id)) {
             // Workspace app — files already exist
@@ -935,154 +1078,74 @@ $examples
     // ── Module Tool Implementations ──
 
     private fun executeCreateModule(args: Map<String, String>): String {
+        // Template-based creation
+        val templateId = args["template"]?.takeIf { it.isNotBlank() }
+        if (templateId != null) {
+            val name = args["name"]?.takeIf { it.isNotBlank() } ?: ""
+            val overrides = mutableMapOf<String, String>()
+            args["description"]?.takeIf { it.isNotBlank() }?.let { overrides["description"] = it }
+            args["port"]?.takeIf { it.isNotBlank() }?.let { overrides["port"] = it }
+            args["instructions"]?.takeIf { it.isNotBlank() }?.let { overrides["instructions"] = it }
+            val module = ModuleFactory.createFromTemplate(moduleStorage, templateId, name, overrides)
+                ?: return "Error: 模板 '$templateId' 未找到。可用模板: ${ModuleFactory.templates.keys.joinToString()}"
+            val scripts = moduleStorage.listScripts(module.id)
+            return "模块已从模板创建: ${module.name} (id=${module.id}, type=${module.serviceType}, port=${module.defaultPort}, ${scripts.size} 个脚本文件)"
+        }
+
         val name = args["name"]?.takeIf { it.isNotBlank() }
             ?: return "Error: name is required"
         val description = args["description"]?.takeIf { it.isNotBlank() } ?: ""
-        val baseUrl = args["base_url"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: base_url is required"
-        val protocol = args["protocol"]?.takeIf { it.isNotBlank() }?.uppercase() ?: "HTTP"
-        val allowPrivateNetwork = args["allow_private_network"]?.equals("true", ignoreCase = true) ?: false
+        val serviceType = args["service_type"]?.takeIf { it.isNotBlank() }?.uppercase() ?: "HTTP"
+        val port = args["port"]?.toIntOrNull() ?: 0
+        val mainScript = args["main_script"]?.takeIf { it.isNotBlank() } ?: "server.py"
         val instructions = args["instructions"]?.takeIf { it.isNotBlank() } ?: ""
 
-        val defaultHeaders = mutableMapOf<String, String>()
-        args["default_headers"]?.takeIf { it.isNotBlank() }?.let {
-            try {
-                val hj = JSONObject(it)
-                hj.keys().forEach { k -> defaultHeaders[k] = hj.getString(k) }
-            } catch (_: Exception) {}
-        }
-
-        val endpoints = mutableListOf<ModuleStorage.Endpoint>()
-        args["endpoints"]?.takeIf { it.isNotBlank() }?.let {
-            try {
-                val arr = JSONArray(it)
-                for (i in 0 until arr.length()) {
-                    val ep = arr.getJSONObject(i)
-                    val epHeaders = mutableMapOf<String, String>()
-                    ep.optJSONObject("headers")?.let { h ->
-                        h.keys().forEach { k -> epHeaders[k] = h.getString(k) }
-                    }
-                    endpoints.add(ModuleStorage.Endpoint(
-                        name = ep.getString("name"),
-                        path = ep.optString("path", ""),
-                        method = ep.optString("method", "GET"),
-                        headers = epHeaders,
-                        bodyTemplate = ep.optString("body_template", ep.optString("bodyTemplate", "")),
-                        description = ep.optString("description", ""),
-                        port = ep.optInt("port", 0),
-                        encoding = ep.optString("encoding", "utf8")
-                    ))
-                }
-            } catch (_: Exception) {}
-        }
-
-        val module = moduleStorage.create(name, description, baseUrl, protocol, defaultHeaders, endpoints, allowPrivateNetwork, instructions)
-        return "模块已创建: ${module.name} (id=${module.id}, protocol=${module.protocol}, allowPrivateNetwork=${module.allowPrivateNetwork}, ${module.endpoints.size} 个端点)"
+        val module = moduleStorage.create(name, description, serviceType, port, mainScript, instructions)
+        return "模块已创建: ${module.name} (id=${module.id}, type=${module.serviceType}, port=${module.defaultPort})"
     }
 
-    private fun executeAddEndpoint(args: Map<String, String>): String {
-        val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: module_id is required"
-        val name = args["name"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: endpoint name is required"
-        val path = args["path"] ?: ""
-        val method = args["method"]?.uppercase() ?: "GET"
+    private fun executeStartModule(args: Map<String, String>): String {
+        val moduleRef = args["module"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: module name or ID is required"
+        val module = moduleStorage.loadById(moduleRef) ?: moduleStorage.findByName(moduleRef)
+            ?: return "Error: 模块 '$moduleRef' 未找到"
         val port = args["port"]?.toIntOrNull() ?: 0
-        val encoding = args["encoding"]?.takeIf { it.isNotBlank() } ?: "utf8"
-
-        val headers = mutableMapOf<String, String>()
-        args["headers"]?.takeIf { it.isNotBlank() }?.let {
-            try {
-                val hj = JSONObject(it)
-                hj.keys().forEach { k -> headers[k] = hj.getString(k) }
-            } catch (_: Exception) {}
-        }
-
-        val bodyTemplate = args["body_template"] ?: ""
-        val description = args["description"] ?: ""
-
-        val endpoint = ModuleStorage.Endpoint(name, path, method, headers, bodyTemplate, description, port, encoding)
-        val module = moduleStorage.addEndpoint(moduleId, endpoint)
-            ?: return "Error: 模块 '$moduleId' 未找到"
-        return "端点 '$name' 已添加到模块 '${module.name}'。总端点数: ${module.endpoints.size}"
+        val result = moduleService.start(module.id, port)
+        return result.fold(
+            onSuccess = { p -> "模块 '${module.name}' 已启动，端口: $p" },
+            onFailure = { e -> "Error: ${e.message}" }
+        )
     }
 
-    private fun executeRemoveEndpoint(args: Map<String, String>): String {
-        val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: module_id is required"
-        val endpointName = args["endpoint_name"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: endpoint_name is required"
-        val module = moduleStorage.removeEndpoint(moduleId, endpointName)
-            ?: return "Error: 模块 '$moduleId' 未找到"
-        return "端点 '$endpointName' 已从模块 '${module.name}' 中移除"
+    private fun executeStopModule(args: Map<String, String>): String {
+        val moduleRef = args["module"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: module name or ID is required"
+        val module = moduleStorage.loadById(moduleRef) ?: moduleStorage.findByName(moduleRef)
+            ?: return "Error: 模块 '$moduleRef' 未找到"
+        return if (moduleService.stop(module.id)) "模块 '${module.name}' 已停止"
+        else "模块 '${module.name}' 未在运行"
     }
 
     private fun executeCallModule(args: Map<String, String>): String {
         val moduleRef = args["module"]?.takeIf { it.isNotBlank() }
             ?: return "Error: module name or ID is required"
-        val endpointName = args["endpoint"]?.takeIf { it.isNotBlank() }
-            ?: return "Error: endpoint name is required"
+        val path = args["path"]?.takeIf { it.isNotBlank() } ?: "/"
+        val method = args["method"]?.takeIf { it.isNotBlank() }?.uppercase() ?: "GET"
+        val body = args["body"]?.takeIf { it.isNotBlank() }
 
         val module = moduleStorage.loadById(moduleRef) ?: moduleStorage.findByName(moduleRef)
             ?: return "Error: 模块 '$moduleRef' 未找到。请使用 list_modules 查看可用模块。"
 
-        val params = mutableMapOf<String, String>()
-        args["params"]?.takeIf { it.isNotBlank() }?.let {
-            try {
-                val pj = JSONObject(it)
-                pj.keys().forEach { k -> params[k] = pj.optString(k, "") }
-            } catch (_: Exception) {}
-        }
-
-        return moduleStorage.callEndpoint(module, endpointName, params)
-    }
-
-    private fun executeListModules(): String {
-        val modules = moduleStorage.loadAll()
-        if (modules.isEmpty()) return "还没有创建任何模块。"
-        val arr = JSONArray()
-        for (m in modules) {
-            arr.put(JSONObject().apply {
-                put("id", m.id)
-                put("name", m.name)
-                put("description", m.description)
-                put("instructions", m.instructions)
-                put("protocol", m.protocol)
-                put("baseUrl", m.baseUrl)
-                put("allowPrivateNetwork", m.allowPrivateNetwork)
-                put("endpoints", JSONArray().apply {
-                    m.endpoints.forEach { ep ->
-                        put(JSONObject().apply {
-                            put("name", ep.name)
-                            put("method", ep.method)
-                            put("path", ep.path)
-                            put("port", ep.port)
-                            put("encoding", ep.encoding)
-                            put("description", ep.description)
-                        })
-                    }
-                })
-            })
-        }
-        return arr.toString(2)
+        return moduleService.callHttp(module.id, path, method, body)
     }
 
     private fun executeUpdateModule(args: Map<String, String>): String {
         val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
             ?: return "Error: module_id is required"
-        val defaultHeaders = mutableMapOf<String, String>()
-        args["default_headers"]?.takeIf { it.isNotBlank() }?.let {
-            try {
-                val hj = JSONObject(it)
-                hj.keys().forEach { k -> defaultHeaders[k] = hj.getString(k) }
-            } catch (_: Exception) {}
-        }
         val module = moduleStorage.updateModule(
             moduleId,
             name = args["name"]?.takeIf { it.isNotBlank() },
             description = args["description"]?.takeIf { it.isNotBlank() },
-            baseUrl = args["base_url"]?.takeIf { it.isNotBlank() },
-            defaultHeaders = if (defaultHeaders.isNotEmpty()) defaultHeaders else null,
             instructions = args["instructions"]?.takeIf { it.isNotBlank() }
         ) ?: return "Error: 模块 '$moduleId' 未找到"
         return "模块 '${module.name}' 已更新 (id=${module.id})"
@@ -1091,8 +1154,84 @@ $examples
     private fun executeDeleteModule(args: Map<String, String>): String {
         val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
             ?: return "Error: module_id is required"
+        // Stop running service first
+        moduleService.stop(moduleId)
         return if (moduleStorage.delete(moduleId)) "模块 $moduleId 已删除。"
         else "Error: 模块 $moduleId 未找到。"
+    }
+
+    private fun executeWriteModuleScript(args: Map<String, String>): String {
+        val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: module_id is required"
+        val filename = args["filename"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: filename is required"
+        val content = args["content"] ?: return "Error: content is required"
+        if (filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
+            return "Error: filename must be a simple name without path separators"
+        }
+        return try {
+            val ok = moduleStorage.writeScript(moduleId, filename, content)
+            if (ok) "脚本 '$filename' 已写入模块 '$moduleId'。"
+            else "Error: 写入失败 — 模块不存在或文件名无效（必须以 .py 结尾）"
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+    }
+
+    private fun executeReadModuleScript(args: Map<String, String>): String {
+        val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: module_id is required"
+        val filename = args["filename"]?.takeIf { it.isNotBlank() }
+        if (filename == null) {
+            val scripts = moduleStorage.listScripts(moduleId)
+            return if (scripts.isEmpty()) "模块 '$moduleId' 没有脚本文件。"
+            else "模块 '$moduleId' 的脚本文件:\n${scripts.joinToString("\n") { "  - $it" }}"
+        }
+        if (filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
+            return "Error: filename must be a simple name without path separators"
+        }
+        return try {
+            moduleStorage.readScript(moduleId, filename)
+                ?: "Error: 脚本 '$filename' 不存在于模块 '$moduleId'。"
+        } catch (e: Exception) {
+            "Error: ${e.message}"
+        }
+    }
+
+    private suspend fun executeTestModuleScript(args: Map<String, String>): String {
+        val moduleId = args["module_id"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: module_id is required"
+        val filename = args["filename"]?.takeIf { it.isNotBlank() }
+            ?: return "Error: filename is required"
+        val function = args["function"]?.takeIf { it.isNotBlank() } ?: "main"
+        val testInput = args["params"]?.takeIf { it.isNotBlank() } ?: "{}"
+        if (filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
+            return "Error: filename must be a simple name without path separators"
+        }
+        val modulesDir = moduleStorage.getScriptsDir(moduleId)
+            ?: return "Error: 模块 '$moduleId' 不存在或脚本目录无法访问。"
+        if (!modulesDir.exists()) return "Error: 模块 '$moduleId' 脚本目录不存在。"
+        val scriptFile = java.io.File(modulesDir, filename)
+        if (!scriptFile.exists()) return "Error: 脚本 '$filename' 不存在。"
+        return try {
+            val inputMap = try {
+                val json = JSONObject(testInput)
+                json.keys().asSequence().associateWith { json.optString(it, "") }
+            } catch (_: Exception) { emptyMap() }
+            val result = pythonRunner.call(
+                scriptDir = modulesDir,
+                scriptFile = filename,
+                funcName = function,
+                args = inputMap
+            )
+            if (result.success) {
+                "✅ 测试通过\n📤 输出:\n${result.data.toString(2)}"
+            } else {
+                "❌ 测试失败\n📤 错误:\n${result.data.optString("error", "unknown error")}"
+            }
+        } catch (e: Exception) {
+            "Error: 脚本执行失败 — ${e.message}"
+        }
     }
 
     // ── Workbench Tool ──

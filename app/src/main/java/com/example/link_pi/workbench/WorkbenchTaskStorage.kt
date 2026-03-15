@@ -14,6 +14,8 @@ class WorkbenchTaskStorage(private val context: Context) {
     private val tasksDir: File
         get() = File(context.filesDir, "workbench_tasks").also { it.mkdirs() }
 
+    private val writeLock = Any()
+
     /* ── Write ── */
 
     fun save(task: WorkbenchTask) {
@@ -36,16 +38,17 @@ class WorkbenchTaskStorage(private val context: Context) {
         }
         val target = File(tasksDir, "${sanitizeId(task.id)}.json")
         val tmp = File(tasksDir, "${sanitizeId(task.id)}.json.tmp")
-        try {
-            tmp.writeText(json.toString())
-            if (!tmp.renameTo(target)) {
-                // renameTo can fail on some filesystems; fall back to copy
-                tmp.copyTo(target, overwrite = true)
+        synchronized(writeLock) {
+            try {
+                tmp.writeText(json.toString())
+                if (!tmp.renameTo(target)) {
+                    tmp.copyTo(target, overwrite = true)
+                    tmp.delete()
+                }
+            } catch (e: Exception) {
                 tmp.delete()
+                Log.w("WorkbenchTaskStorage", "Failed to save task ${task.id}", e)
             }
-        } catch (e: Exception) {
-            tmp.delete()
-            throw e
         }
     }
 
