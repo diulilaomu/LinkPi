@@ -4,6 +4,7 @@ import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -109,6 +110,7 @@ import com.example.link_pi.workbench.PlanStep
 import com.example.link_pi.workbench.PlanStepStatus
 import com.example.link_pi.workbench.TaskStatus
 import com.example.link_pi.workbench.WorkbenchMessage
+import com.example.link_pi.workbench.WorkbenchRound
 import com.example.link_pi.workbench.WorkbenchTask
 import com.example.link_pi.workbench.derivePlanSteps
 import kotlinx.coroutines.Dispatchers
@@ -133,6 +135,8 @@ fun WorkbenchDetailScreen(
     val task = tasks.find { it.id == taskId }
     val allStepsMap by viewModel.engineStepsMap.collectAsState()
     val engineSteps = allStepsMap[taskId] ?: emptyList()
+    val allRoundsMap by viewModel.roundsMap.collectAsState()
+    val historyRounds = allRoundsMap[taskId] ?: emptyList()
     val isActiveTask = viewModel.activeTaskId.collectAsState().value == taskId
 
     if (task == null) {
@@ -281,6 +285,7 @@ fun WorkbenchDetailScreen(
                 )
                 1 -> WorkspaceTabContent(
                     engineSteps = engineSteps,
+                    historyRounds = historyRounds,
                     isActiveTask = isActiveTask,
                     task = task,
                     viewModel = viewModel,
@@ -353,6 +358,7 @@ private fun StatusLabel(task: WorkbenchTask, actualFileCount: Int) {
 @Composable
 private fun WorkspaceTabContent(
     engineSteps: List<AgentStep>,
+    historyRounds: List<WorkbenchRound>,
     isActiveTask: Boolean,
     task: WorkbenchTask,
     viewModel: WorkbenchViewModel,
@@ -380,19 +386,23 @@ private fun WorkspaceTabContent(
     val activeModelId by viewModel.activeModelId.collectAsState()
     val deepThinking by viewModel.deepThinking.collectAsState()
 
-    // Derive plan steps and messages from agent steps
+    // Derive plan steps and current round messages
     val planSteps = remember(engineSteps.size, task.status) {
         derivePlanSteps(engineSteps, task.status)
     }
-    val workbenchMessages = remember(engineSteps.size) {
+    val currentMessages = remember(engineSteps.size) {
         WorkbenchMessage.fromSteps(engineSteps)
+    }
+    val currentDisplayItems = remember(currentMessages.size) {
+        groupIntoDisplayItems(currentMessages)
     }
 
     val msgListState = rememberLazyListState()
     // Auto-scroll to bottom when new messages arrive
-    LaunchedEffect(workbenchMessages.size) {
-        if (workbenchMessages.isNotEmpty()) {
-            msgListState.animateScrollToItem(workbenchMessages.size - 1)
+    val totalItemCount = historyRounds.size + currentDisplayItems.size
+    LaunchedEffect(totalItemCount) {
+        if (totalItemCount > 0) {
+            msgListState.animateScrollToItem(totalItemCount - 1)
         }
     }
 
@@ -410,7 +420,7 @@ private fun WorkspaceTabContent(
             )
         }
 
-        // ── Message list ──
+        // ── Message list: historical rounds (collapsed) + current round (expanded) ──
         LazyColumn(
             state = msgListState,
             modifier = Modifier
@@ -419,7 +429,13 @@ private fun WorkspaceTabContent(
             contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            if (workbenchMessages.isEmpty()) {
+            // Historical rounds — each is a collapsible card
+            items(historyRounds.size, key = { "round_$it" }) { index ->
+                HistoryRoundCard(round = historyRounds[index])
+            }
+
+            // Current round
+            if (currentDisplayItems.isEmpty() && historyRounds.isEmpty()) {
                 item {
                     Box(
                         modifier = Modifier
@@ -434,14 +450,46 @@ private fun WorkspaceTabContent(
                         )
                     }
                 }
-            }
-            items(workbenchMessages, key = { it.id }) { msg ->
-                when (msg) {
-                    is WorkbenchMessage.Thinking -> ThinkingMessageBlock(msg)
-                    is WorkbenchMessage.ToolCall -> ToolCallMessageBlock(msg)
-                    is WorkbenchMessage.ToolResult -> ToolResultMessageBlock(msg)
-                    is WorkbenchMessage.CodeChange -> CodeChangeMessageBlock(msg)
-                    is WorkbenchMessage.Status -> StatusMessageBlock(msg)
+            } else if (currentDisplayItems.isNotEmpty()) {
+                // Current round header (always visible, not collapsible)
+                item(key = "current_header") {
+                    val roundNum = historyRounds.size + 1
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = "第 $roundNum 轮",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = task.userPrompt.take(60),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                // Current round messages — expanded
+                items(currentDisplayItems.size, key = { "current_$it" }) { index ->
+                    when (val item = currentDisplayItems[index]) {
+                        is DisplayItem.Single -> AgentMessageRow(item.msg)
+                        is DisplayItem.SubAgentGroup -> SubAgentGroupCard(item.messages)
+                    }
                 }
             }
         }
@@ -569,45 +617,330 @@ private fun PlanStepChip(step: PlanStep) {
     }
 }
 
-// ━━━━━━━━━━━━━ Workbench Message Blocks ━━━━━━━━━━━━━
+// ━━━━━━━━━━━━━ History Round Card (two-level collapsible) ━━━━━━━━━━━━━
 @Composable
-private fun ThinkingMessageBlock(msg: WorkbenchMessage.Thinking) {
+private fun HistoryRoundCard(round: WorkbenchRound) {
     var expanded by remember { mutableStateOf(false) }
-    val accentColor = MaterialTheme.colorScheme.tertiary
+    val accentColor = MaterialTheme.colorScheme.outline
 
     Surface(
-        onClick = { expanded = !expanded },
         shape = RoundedCornerShape(10.dp),
-        color = accentColor.copy(alpha = 0.06f)
+        color = accentColor.copy(alpha = 0.05f),
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(10.dp)) {
+        Column(modifier = Modifier.animateContentSize()) {
+            // Level 1: Round header — user prompt + summary
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
             ) {
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = accentColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = "第 ${round.index + 1} 轮",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = accentColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = round.userPrompt.take(60),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = round.summary,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                        color = accentColor.copy(alpha = 0.7f),
+                        maxLines = 1
+                    )
+                }
                 Icon(
-                    Icons.Outlined.Lightbulb,
+                    if (expanded) Icons.Filled.KeyboardArrowDown
+                    else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
                     contentDescription = null,
-                    modifier = Modifier.size(14.dp),
-                    tint = accentColor
+                    modifier = Modifier.size(16.dp),
+                    tint = accentColor.copy(alpha = 0.5f)
+                )
+            }
+
+            // Level 2: Expanded AI process messages (individually collapsible via existing cards)
+            if (expanded) {
+                HorizontalDivider(
+                    color = accentColor.copy(alpha = 0.12f),
+                    modifier = Modifier.padding(horizontal = 10.dp)
+                )
+                val displayItems = remember(round.messages.size) {
+                    groupIntoDisplayItems(round.messages)
+                }
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    for (item in displayItems) {
+                        when (item) {
+                            is DisplayItem.Single -> AgentMessageRow(item.msg, showSourceLabel = false)
+                            is DisplayItem.SubAgentGroup -> SubAgentGroupCard(item.messages)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━ Display Item Grouping ━━━━━━━━━━━━━
+private sealed class DisplayItem {
+    data class Single(val msg: WorkbenchMessage) : DisplayItem()
+    data class SubAgentGroup(val messages: List<WorkbenchMessage>) : DisplayItem()
+}
+
+/** Group consecutive sub-agent messages into collapsible groups. */
+private fun groupIntoDisplayItems(messages: List<WorkbenchMessage>): List<DisplayItem> {
+    val result = mutableListOf<DisplayItem>()
+    val subGroup = mutableListOf<WorkbenchMessage>()
+    for (msg in messages) {
+        if (msg.source == "sub") {
+            subGroup.add(msg)
+        } else {
+            if (subGroup.isNotEmpty()) {
+                result.add(DisplayItem.SubAgentGroup(subGroup.toList()))
+                subGroup.clear()
+            }
+            result.add(DisplayItem.Single(msg))
+        }
+    }
+    if (subGroup.isNotEmpty()) {
+        result.add(DisplayItem.SubAgentGroup(subGroup.toList()))
+    }
+    return result
+}
+
+// ━━━━━━━━━━━━━ Sub-Agent Group Card ━━━━━━━━━━━━━
+@Composable
+private fun SubAgentGroupCard(messages: List<WorkbenchMessage>) {
+    var expanded by remember { mutableStateOf(false) }
+    val agentColor = MaterialTheme.colorScheme.tertiary
+    val fileOps = messages.count { it is WorkbenchMessage.CodeChange }
+    val toolCalls = messages.count { it is WorkbenchMessage.ToolCall || it is WorkbenchMessage.ToolResult }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = agentColor.copy(alpha = 0.06f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.animateContentSize()) {
+            // Header
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = agentColor.copy(alpha = 0.15f)
+                ) {
+                    Text(
+                        text = "副Agent",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = agentColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = buildString {
+                        append("${messages.size} 条消息")
+                        if (fileOps > 0) append(" · $fileOps 文件操作")
+                        if (toolCalls > 0) append(" · $toolCalls 工具调用")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = agentColor.copy(alpha = 0.7f),
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    if (expanded) Icons.Filled.KeyboardArrowDown
+                    else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = agentColor.copy(alpha = 0.5f)
+                )
+            }
+
+            // Expanded content
+            if (expanded) {
+                HorizontalDivider(
+                    color = agentColor.copy(alpha = 0.15f),
+                    modifier = Modifier.padding(horizontal = 10.dp)
+                )
+                Column(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    for (msg in messages) {
+                        AgentMessageRow(msg, showSourceLabel = false)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ━━━━━━━━━━━━━ Agent Chat Message Row ━━━━━━━━━━━━━
+@Composable
+private fun AgentMessageRow(msg: WorkbenchMessage, showSourceLabel: Boolean = true) {
+    val isMain = msg.source != "sub"
+    val agentLabel = if (msg.source == "sub") "副Agent" else "主Agent"
+    val agentColor = if (isMain)
+        MaterialTheme.colorScheme.primary
+    else
+        MaterialTheme.colorScheme.tertiary
+
+    // Status messages: compact inline, no card
+    if (msg is WorkbenchMessage.Status) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 1.dp, horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(CircleShape)
+                    .background(agentColor.copy(alpha = 0.5f))
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            if (showSourceLabel) {
+                Text(
+                    text = agentLabel,
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                    color = agentColor.copy(alpha = 0.7f)
                 )
                 Spacer(modifier = Modifier.width(6.dp))
+            }
+            Text(
+                text = msg.text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        return
+    }
+
+    // Thinking messages: collapsible inline (like Status but with expand)
+    if (msg is WorkbenchMessage.Thinking) {
+        ThinkingCard(msg, agentLabel, agentColor, showSourceLabel)
+        return
+    }
+
+    // Card-based messages
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // Agent label header
+        if (showSourceLabel) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 2.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = agentColor.copy(alpha = 0.12f)
+                ) {
+                    Text(
+                        text = agentLabel,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        ),
+                        color = agentColor,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                    )
+                }
+            }
+        }
+
+        // Message content card
+        when (msg) {
+            is WorkbenchMessage.ToolCall -> ToolCallCard(msg, agentColor)
+            is WorkbenchMessage.ToolResult -> ToolResultCard(msg)
+            is WorkbenchMessage.CodeChange -> CodeChangeCard(msg)
+            is WorkbenchMessage.Thinking -> {} // Handled above
+            is WorkbenchMessage.Status -> {} // Handled above
+        }
+    }
+}
+
+@Composable
+private fun ThinkingCard(
+    msg: WorkbenchMessage.Thinking,
+    agentLabel: String,
+    agentColor: Color,
+    showSourceLabel: Boolean
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = agentColor.copy(alpha = 0.04f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(agentColor.copy(alpha = 0.5f))
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                if (showSourceLabel) {
+                    Text(
+                        text = agentLabel,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, fontWeight = FontWeight.Bold),
+                        color = agentColor.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
                 Text(
-                    text = msg.summary,
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
-                    color = accentColor,
+                    text = "💡 ${msg.summary}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = if (expanded) "收起 ▲" else "${msg.content.lines().size} 行 ▼",
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                    color = accentColor.copy(alpha = 0.5f)
+                Icon(
+                    if (expanded) Icons.Outlined.KeyboardArrowDown
+                    else Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = agentColor.copy(alpha = 0.4f)
                 )
             }
-
             AnimatedVisibility(
                 visible = expanded,
                 enter = expandVertically(),
@@ -616,12 +949,14 @@ private fun ThinkingMessageBlock(msg: WorkbenchMessage.Thinking) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 8.dp)
+                        .padding(top = 6.dp)
                         .background(
                             MaterialTheme.colorScheme.surfaceContainerLow,
-                            RoundedCornerShape(8.dp)
+                            RoundedCornerShape(6.dp)
                         )
-                        .padding(10.dp)
+                        .heightIn(max = 400.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(8.dp)
                 ) {
                     Text(
                         text = msg.content,
@@ -639,13 +974,13 @@ private fun ThinkingMessageBlock(msg: WorkbenchMessage.Thinking) {
 }
 
 @Composable
-private fun ToolCallMessageBlock(msg: WorkbenchMessage.ToolCall) {
+private fun ToolCallCard(msg: WorkbenchMessage.ToolCall, accentColor: Color) {
     var expanded by remember { mutableStateOf(false) }
     val hasArgs = msg.args.isNotBlank()
 
     Surface(
         shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = if (hasArgs) Modifier.clickable { expanded = !expanded } else Modifier
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
@@ -673,7 +1008,7 @@ private fun ToolCallMessageBlock(msg: WorkbenchMessage.ToolCall) {
             if (expanded && hasArgs) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = msg.args.take(500),
+                    text = msg.args,
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -687,7 +1022,7 @@ private fun ToolCallMessageBlock(msg: WorkbenchMessage.ToolCall) {
 }
 
 @Composable
-private fun ToolResultMessageBlock(msg: WorkbenchMessage.ToolResult) {
+private fun ToolResultCard(msg: WorkbenchMessage.ToolResult) {
     var expanded by remember { mutableStateOf(false) }
     val hasDetail = msg.detail.isNotBlank()
 
@@ -732,7 +1067,7 @@ private fun ToolResultMessageBlock(msg: WorkbenchMessage.ToolResult) {
             if (expanded && hasDetail) {
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = msg.detail.take(1000),
+                    text = msg.detail,
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = FontFamily.Monospace,
                         fontSize = 10.sp,
@@ -746,15 +1081,17 @@ private fun ToolResultMessageBlock(msg: WorkbenchMessage.ToolResult) {
 }
 
 @Composable
-private fun CodeChangeMessageBlock(msg: WorkbenchMessage.CodeChange) {
+private fun CodeChangeCard(msg: WorkbenchMessage.CodeChange) {
     var expanded by remember { mutableStateOf(false) }
     val hasDetail = msg.detail.isNotBlank()
 
     val (opColor, opIcon) = when (msg.operation) {
-        "创建" -> MaterialTheme.colorScheme.primary to "+"
-        "写入" -> MaterialTheme.colorScheme.tertiary to "✎"
-        "删除" -> MaterialTheme.colorScheme.error to "−"
-        else -> MaterialTheme.colorScheme.secondary to "△"
+        "创建" -> MaterialTheme.colorScheme.primary to Icons.Filled.Add
+        "写入" -> MaterialTheme.colorScheme.tertiary to Icons.Filled.Edit
+        "删除" -> MaterialTheme.colorScheme.error to Icons.Filled.Close
+        "查看" -> MaterialTheme.colorScheme.secondary to Icons.Outlined.Description
+        "列出" -> MaterialTheme.colorScheme.secondary to Icons.Outlined.FolderOpen
+        else -> MaterialTheme.colorScheme.secondary to Icons.Outlined.Code
     }
 
     Surface(
@@ -764,18 +1101,18 @@ private fun CodeChangeMessageBlock(msg: WorkbenchMessage.CodeChange) {
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Operation badge
+                // Operation icon
                 Surface(
                     shape = RoundedCornerShape(4.dp),
                     color = opColor.copy(alpha = 0.15f)
                 ) {
-                    Text(
-                        text = opIcon,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold, fontSize = 11.sp
-                        ),
-                        color = opColor,
-                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                    Icon(
+                        opIcon,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .padding(3.dp)
+                            .size(12.dp),
+                        tint = opColor
                     )
                 }
                 Spacer(modifier = Modifier.width(8.dp))
@@ -819,13 +1156,13 @@ private fun CodeChangeMessageBlock(msg: WorkbenchMessage.CodeChange) {
                             MaterialTheme.colorScheme.surfaceContainerLow,
                             RoundedCornerShape(6.dp)
                         )
-                        .heightIn(max = 200.dp)
+                        .heightIn(max = 400.dp)
                         .verticalScroll(rememberScrollState())
                         .horizontalScroll(rememberScrollState())
                         .padding(8.dp)
                 ) {
                     Text(
-                        text = msg.detail.take(2000),
+                        text = msg.detail,
                         style = MaterialTheme.typography.bodySmall.copy(
                             fontFamily = FontFamily.Monospace,
                             fontSize = 10.sp,
@@ -836,31 +1173,6 @@ private fun CodeChangeMessageBlock(msg: WorkbenchMessage.CodeChange) {
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun StatusMessageBlock(msg: WorkbenchMessage.Status) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier
-                .size(4.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = msg.text,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 

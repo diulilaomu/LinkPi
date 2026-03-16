@@ -8,8 +8,8 @@ import com.example.link_pi.workspace.WorkspaceManager
  * Silent agent that analyzes generated/modified code and produces
  * APP_INFO.json + ARCHITECTURE.md.
  *
- * Runs as an independent chain after code generation/modification completes —
- * fully decoupled from the create/modify main chain. Has read-only tool-call
+ * Runs as an independent chain after code generation completes —
+ * fully decoupled from the main build chain. Has read-only tool-call
  * ability to explore workspace files autonomously.
  */
 class AppInfoAgent(

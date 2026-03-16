@@ -38,6 +38,60 @@
             </intent-filter>
         </activity>
 
+        <!-- SSH standalone activity — independent recents card -->
+        <activity
+            android:name=".SshActivity"
+            android:taskAffinity="com.example.link_pi.ssh"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+
+        <!-- MiniApp base activity -->
+        <activity
+            android:name=".MiniAppActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+
+        <!-- Concrete task-slot Activities with distinct taskAffinity for task isolation. -->
+        <activity android:name=".MiniAppSlot0"
+            android:taskAffinity="com.example.link_pi.slot0"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+        <activity android:name=".MiniAppSlot1"
+            android:taskAffinity="com.example.link_pi.slot1"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+        <activity android:name=".MiniAppSlot2"
+            android:taskAffinity="com.example.link_pi.slot2"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+        <activity android:name=".MiniAppSlot3"
+            android:taskAffinity="com.example.link_pi.slot3"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+        <activity android:name=".MiniAppSlot4"
+            android:taskAffinity="com.example.link_pi.slot4"
+            android:autoRemoveFromRecents="false"
+            android:resizeableActivity="true"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Linkpi" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

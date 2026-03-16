@@ -662,8 +662,7 @@ private fun SkillEditorDialog(
                         Spacer(modifier = Modifier.height(4.dp))
                         val intentLabels = listOf(
                             UserIntent.CONVERSATION to "💬 对话",
-                            UserIntent.CREATE_APP to "🆕 创建应用",
-                            UserIntent.MODIFY_APP to "✏️ 修改应用",
+                            UserIntent.BUILD_APP to "📱 应用开发",
                             UserIntent.MODULE_MGMT to "📦 模块管理",
                             UserIntent.MEMORY_OPS to "🧠 记忆操作"
                         )

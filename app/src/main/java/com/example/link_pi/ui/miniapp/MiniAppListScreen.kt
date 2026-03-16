@@ -45,7 +45,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.MiniAppStorage
-import com.example.link_pi.miniapp.WebViewPool
 import com.example.link_pi.workspace.WorkspaceManager
 import java.io.File
 import java.io.FileOutputStream
@@ -58,7 +57,6 @@ import java.util.zip.ZipOutputStream
 @Composable
 fun MiniAppListScreen(
     storage: MiniAppStorage,
-    webViewPool: WebViewPool,
     onRunApp: (MiniApp) -> Unit
 ) {
     val context = LocalContext.current
@@ -112,7 +110,6 @@ fun MiniAppListScreen(
             confirmButton = {
                 TextButton(onClick = {
                     storage.delete(app.id)
-                    webViewPool.destroy(app.id)
                     if (app.isWorkspaceApp) {
                         WorkspaceManager(context).deleteWorkspace(app.id)
                     }

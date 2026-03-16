@@ -109,20 +109,15 @@ object PromptAssembler {
 
     /** 按 intent × phase 选择域指令文本 */
     private fun resolveDomainText(intent: UserIntent, phase: PromptDomain.Phase): String = when {
-        // CREATE_APP
-        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.PLANNING ->
-            PromptCreate.CAPABILITY_CATALOG + "\n\n" + PromptCreate.planning()
-        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.GENERATION ->
-            PromptCreate.generation()
-        intent == UserIntent.CREATE_APP && phase == PromptDomain.Phase.SELF_CHECK ->
-            PromptCreate.selfCheck()
-        // MODIFY_APP
-        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.PLANNING ->
-            PromptCreate.CAPABILITY_CATALOG + "\n\n" + PromptModify.planning()
-        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.GENERATION ->
-            PromptModify.generation()
-        intent == UserIntent.MODIFY_APP && phase == PromptDomain.Phase.SELF_CHECK ->
-            PromptModify.selfCheck()
+        // BUILD_APP
+        intent == UserIntent.BUILD_APP && phase == PromptDomain.Phase.PLANNING ->
+            PromptApp.CAPABILITY_CATALOG + "\n\n" + PromptApp.planning()
+        intent == UserIntent.BUILD_APP && phase == PromptDomain.Phase.GENERATION ->
+            PromptApp.generation()
+        intent == UserIntent.BUILD_APP && phase == PromptDomain.Phase.SUB_EXECUTION ->
+            PromptApp.subAgentSystem()
+        intent == UserIntent.BUILD_APP && phase == PromptDomain.Phase.SELF_CHECK ->
+            PromptApp.selfCheck()
         // MODULE
         intent == UserIntent.MODULE_MGMT -> PromptModule.workflow()
         // CONVERSATION / MEMORY_OPS — 无专属工作流
@@ -156,6 +151,7 @@ object PromptAssembler {
     private fun PromptDomain.Phase.toAgentPhase(): AgentPhase = when (this) {
         PromptDomain.Phase.PLANNING -> AgentPhase.PLANNING
         PromptDomain.Phase.GENERATION -> AgentPhase.GENERATION
+        PromptDomain.Phase.SUB_EXECUTION -> AgentPhase.GENERATION
         PromptDomain.Phase.SELF_CHECK -> AgentPhase.REFINEMENT
     }
 
@@ -196,31 +192,4 @@ object PromptAssembler {
         return CapabilitySelection(toolGroups, bridgeGroups, cdnGroups)
     }
 
-    /** Generation mode determined by AI during planning. */
-    enum class GenerationMode { FAST, FULL }
-
-    /**
-     * Parse `<generation_mode>FAST|FULL</generation_mode>` from planning response.
-     * Defaults to FULL if not found (safe fallback).
-     */
-    fun parseGenerationMode(planningResponse: String): GenerationMode {
-        val regex = Regex("""<generation_mode>\s*(FAST|FULL)\s*</generation_mode>""", RegexOption.IGNORE_CASE)
-        val match = regex.find(planningResponse) ?: return GenerationMode.FULL
-        return when (match.groupValues[1].uppercase()) {
-            "FAST" -> GenerationMode.FAST
-            else -> GenerationMode.FULL
-        }
-    }
-
-    /**
-     * Extract `<architecture>...</architecture>` block from planning response.
-     * This block contains the AI's structured architecture plan for the project.
-     * Returns the raw text content of the block, or null if not found.
-     */
-    fun parseArchitectureBlueprint(planningResponse: String): String? {
-        val regex = Regex("""<architecture>\s*([\s\S]*?)\s*</architecture>""")
-        val match = regex.find(planningResponse) ?: return null
-        val content = match.groupValues[1].trim()
-        return if (content.isNotBlank()) content else null
-    }
 }

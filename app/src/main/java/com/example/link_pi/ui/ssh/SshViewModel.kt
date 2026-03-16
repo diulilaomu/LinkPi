@@ -839,7 +839,10 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
         reconnectJob?.cancel()
         reconnectJob = viewModelScope.launch {
             _isReconnecting.value = true
-            while (isActive) {
+            var attempts = 0
+            val maxAttempts = 20 // ~60s total
+            while (isActive && attempts < maxAttempts) {
+                attempts++
                 val result = withContext(Dispatchers.IO) {
                     sshManager.reconnect(sessionId, reconnectPassword)
                 }
@@ -862,6 +865,11 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 // Wait 3 seconds before retrying
                 delay(3000)
+            }
+            // Max attempts reached — give up
+            if (isActive) {
+                _isReconnecting.value = false
+                appendTerminalOutput("\n[重连失败，已放弃自动重连。请手动重连或断开连接。]\n")
             }
         }
     }
@@ -1728,6 +1736,19 @@ class SshViewModel(application: Application) : AndroidViewModel(application) {
             json.optString("stdout", "")
         } catch (_: Exception) {
             ""
+        }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        reconnectJob?.cancel()
+        shellReadJob?.cancel()
+        inputBufferJob?.cancel()
+        // Only remove keepalive client if there are no active SSH sessions left.
+        // If sessions are still alive in SshManager, KeepAliveService must keep running
+        // so the process stays alive and sessions can be restored when Activity is recreated.
+        if (sshManager.getActiveSessions().isEmpty()) {
+            KeepAliveService.removeClient(getApplication(), "ssh")
         }
     }
 }

@@ -79,6 +79,7 @@ import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.miniapp.ShortcutHelper
 import com.example.link_pi.miniapp.SdkManager
 import com.example.link_pi.miniapp.SdkModule
+import com.example.link_pi.SshActivity
 import com.example.link_pi.ui.miniapp.PinToHomeDialog
 import com.example.link_pi.ui.navigation.Screen
 import com.example.link_pi.workbench.TaskStatus
@@ -183,10 +184,10 @@ fun WorkbenchListScreen(
                                     )
                                 },
                                 name = "SSH 终端",
-                                onClick = onOpenSsh,
+                                onClick = { SshActivity.launch(context) },
                                 menuItems = listOf("固定应用"),
                                 onMenuAction = {
-                                    ShortcutHelper.pinBuiltInToHomeScreen(context, Screen.SshHome.route, "SSH 终端", "")
+                                    ShortcutHelper.pinSshToHomeScreen(context, "SSH 终端", "")
                                 }
                             )
                         }

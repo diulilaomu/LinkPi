@@ -137,7 +137,8 @@ data class WorkbenchRedirect(
 data class AgentStep(
     val type: StepType,
     val description: String,
-    val detail: String = ""
+    val detail: String = "",
+    val source: String = ""   // "main" = 主Agent, "sub" = 副Agent
 )
 
 enum class StepType {

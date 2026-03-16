@@ -2,6 +2,9 @@ package com.example.link_pi.workbench
 
 import com.example.link_pi.agent.AgentStep
 import com.example.link_pi.agent.StepType
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Rich message types for the workbench message center.
@@ -10,11 +13,13 @@ import com.example.link_pi.agent.StepType
 sealed class WorkbenchMessage {
     abstract val id: Int
     abstract val timestamp: Long
+    abstract val source: String   // "main" or "sub"
 
     /** AI thinking / reasoning content — collapsible */
     data class Thinking(
         override val id: Int,
         override val timestamp: Long = System.currentTimeMillis(),
+        override val source: String = "",
         val summary: String,
         val content: String
     ) : WorkbenchMessage()
@@ -23,6 +28,7 @@ sealed class WorkbenchMessage {
     data class ToolCall(
         override val id: Int,
         override val timestamp: Long = System.currentTimeMillis(),
+        override val source: String = "",
         val toolName: String,
         val description: String,
         val args: String = ""
@@ -32,6 +38,7 @@ sealed class WorkbenchMessage {
     data class ToolResult(
         override val id: Int,
         override val timestamp: Long = System.currentTimeMillis(),
+        override val source: String = "",
         val success: Boolean,
         val description: String,
         val detail: String = ""
@@ -41,8 +48,9 @@ sealed class WorkbenchMessage {
     data class CodeChange(
         override val id: Int,
         override val timestamp: Long = System.currentTimeMillis(),
+        override val source: String = "",
         val filePath: String,
-        val operation: String,   // "创建", "修改", "写入"
+        val operation: String,   // "创建", "修改", "写入", "查看", "列出"
         val detail: String = ""
     ) : WorkbenchMessage()
 
@@ -50,25 +58,40 @@ sealed class WorkbenchMessage {
     data class Status(
         override val id: Int,
         override val timestamp: Long = System.currentTimeMillis(),
+        override val source: String = "",
         val text: String
     ) : WorkbenchMessage()
 
     companion object {
         /** Convert a list of AgentSteps into WorkbenchMessages for display. */
         fun fromSteps(steps: List<AgentStep>): List<WorkbenchMessage> {
+            // Deduplicate consecutive steps with same type + description
+            val deduped = buildList<AgentStep> {
+                for (step in steps) {
+                    val prev: AgentStep? = lastOrNull()
+                    if (prev != null && prev.type == step.type && prev.description == step.description) {
+                        set(size - 1, step)  // keep last (most complete) version
+                    } else {
+                        add(step)
+                    }
+                }
+            }
             val messages = mutableListOf<WorkbenchMessage>()
-            for ((index, step) in steps.withIndex()) {
+            for ((index, step) in deduped.withIndex()) {
+                val src = step.source
                 when (step.type) {
                     StepType.THINKING -> {
-                        if (step.detail.isNotBlank() && step.detail.length > 50) {
+                        if (step.detail.isNotBlank() && step.detail.length > 30) {
                             messages.add(Thinking(
                                 id = index,
+                                source = src,
                                 summary = step.description.take(80),
                                 content = step.detail
                             ))
                         } else {
                             messages.add(Status(
                                 id = index,
+                                source = src,
                                 text = step.description
                             ))
                         }
@@ -76,11 +99,12 @@ sealed class WorkbenchMessage {
                     StepType.TOOL_CALL -> {
                         val toolName = step.description
                             .removePrefix("调用 ").trim()
-                        val isFileOp = toolName in setOf(
+                        val isFileWrite = toolName in setOf(
                             "create_file", "write_file", "replace_in_file",
                             "replace_lines", "delete_file"
                         )
-                        if (isFileOp) {
+                        val isFileRead = toolName in setOf("read_file", "list_files")
+                        if (isFileWrite) {
                             val filePath = extractFilePath(step.detail)
                             val op = when {
                                 toolName == "create_file" -> "创建"
@@ -90,6 +114,17 @@ sealed class WorkbenchMessage {
                             }
                             messages.add(CodeChange(
                                 id = index,
+                                source = src,
+                                filePath = filePath,
+                                operation = op,
+                                detail = step.detail
+                            ))
+                        } else if (isFileRead) {
+                            val filePath = extractFilePath(step.detail)
+                            val op = if (toolName == "list_files") "列出" else "查看"
+                            messages.add(CodeChange(
+                                id = index,
+                                source = src,
                                 filePath = filePath,
                                 operation = op,
                                 detail = step.detail
@@ -97,6 +132,7 @@ sealed class WorkbenchMessage {
                         } else {
                             messages.add(ToolCall(
                                 id = index,
+                                source = src,
                                 toolName = toolName,
                                 description = step.description,
                                 args = step.detail
@@ -107,6 +143,7 @@ sealed class WorkbenchMessage {
                         val success = step.description.startsWith("✓")
                         messages.add(ToolResult(
                             id = index,
+                            source = src,
                             success = success,
                             description = step.description,
                             detail = step.detail
@@ -115,6 +152,7 @@ sealed class WorkbenchMessage {
                     StepType.FINAL_RESPONSE -> {
                         messages.add(Status(
                             id = index,
+                            source = src,
                             text = step.description
                         ))
                     }
@@ -132,6 +170,75 @@ sealed class WorkbenchMessage {
             if (fileMatch != null) return fileMatch.groupValues[1]
             return detail.take(60)
         }
+    }
+}
+
+/**
+ * A round of conversation in the workbench: one user prompt → AI work.
+ * Used for the two-level collapsible UI:
+ *   Level 1: Round (user prompt + AI summary)
+ *   Level 2: Individual AI process messages (thinking, tool calls, results)
+ */
+data class WorkbenchRound(
+    val index: Int,
+    val userPrompt: String,
+    val messages: List<WorkbenchMessage>,
+    val timestamp: Long = System.currentTimeMillis(),
+    val isLatest: Boolean = false
+) {
+    /** Summary line for the collapsed round header. */
+    val summary: String get() {
+        val fileOps = messages.count { it is WorkbenchMessage.CodeChange }
+        val toolCalls = messages.count { it is WorkbenchMessage.ToolCall }
+        val thinkings = messages.count { it is WorkbenchMessage.Thinking }
+        return buildString {
+            append("${messages.size} 条消息")
+            if (fileOps > 0) append(" · $fileOps 文件操作")
+            if (toolCalls > 0) append(" · $toolCalls 工具调用")
+            if (thinkings > 0) append(" · $thinkings 思考")
+        }
+    }
+
+    /** Export this round as Markdown content for history archival. */
+    fun toMarkdown(): String = buildString {
+        val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+        appendLine("# 第 ${index + 1} 轮修改")
+        appendLine()
+        appendLine("**时间**: ${df.format(Date(timestamp))}")
+        appendLine()
+        appendLine("## 用户需求")
+        appendLine()
+        appendLine(userPrompt)
+        appendLine()
+        appendLine("## AI 工作过程")
+        appendLine()
+        for (msg in messages) {
+            when (msg) {
+                is WorkbenchMessage.Thinking -> {
+                    appendLine("### 💡 ${msg.summary}")
+                    appendLine()
+                    appendLine("```")
+                    appendLine(msg.content.take(2000))
+                    appendLine("```")
+                    appendLine()
+                }
+                is WorkbenchMessage.ToolCall -> {
+                    appendLine("- 🔧 **${msg.toolName}**: ${msg.description}")
+                    if (msg.args.isNotBlank()) appendLine("  - 参数: `${msg.args.take(200)}`")
+                }
+                is WorkbenchMessage.ToolResult -> {
+                    val icon = if (msg.success) "✓" else "✗"
+                    appendLine("- $icon ${msg.description}")
+                }
+                is WorkbenchMessage.CodeChange -> {
+                    appendLine("- 📄 **${msg.operation}** `${msg.filePath}`")
+                }
+                is WorkbenchMessage.Status -> {
+                    appendLine("- ● ${msg.text}")
+                }
+            }
+        }
+        appendLine()
     }
 }
 

@@ -19,6 +19,7 @@ import com.example.link_pi.network.AiConfig
 import com.example.link_pi.network.AiService
 import com.example.link_pi.skill.BuiltInSkills
 import com.example.link_pi.skill.UserIntent
+import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,12 +46,20 @@ class WorkbenchEngine(
     private val _stepsMap = MutableStateFlow<Map<String, List<AgentStep>>>(emptyMap())
     val stepsMap: StateFlow<Map<String, List<AgentStep>>> = _stepsMap
 
+    /** Historical rounds per task: completed rounds from previous modify calls. */
+    private val _roundsMap = MutableStateFlow<Map<String, List<WorkbenchRound>>>(emptyMap())
+    val roundsMap: StateFlow<Map<String, List<WorkbenchRound>>> = _roundsMap
+
     /** Get steps for a specific task. */
     fun stepsFor(taskId: String): List<AgentStep> = _stepsMap.value[taskId] ?: emptyList()
+
+    /** Get historical rounds for a specific task. */
+    fun roundsFor(taskId: String): List<WorkbenchRound> = _roundsMap.value[taskId] ?: emptyList()
 
     /** Remove steps for a deleted task to prevent memory leak. */
     fun clearSteps(taskId: String) {
         _stepsMap.update { it - taskId }
+        _roundsMap.update { it - taskId }
     }
 
     /**
@@ -68,6 +77,20 @@ class WorkbenchEngine(
         task: WorkbenchTask,
         onUpdate: (WorkbenchTask) -> Unit = {}
     ): WorkbenchTask = withContext(Dispatchers.IO) {
+        // Archive previous steps (if any) as a completed round before starting new work
+        val previousSteps = _stepsMap.value[task.id] ?: emptyList()
+        if (previousSteps.isNotEmpty()) {
+            val prevMessages = WorkbenchMessage.fromSteps(previousSteps)
+            val existingRounds = _roundsMap.value[task.id] ?: emptyList()
+            val round = WorkbenchRound(
+                index = existingRounds.size,
+                userPrompt = task.userPrompt,
+                messages = prevMessages
+            )
+            _roundsMap.update { it + (task.id to existingRounds + round) }
+            // Save round as .md file in workspace his/ directory
+            saveRoundToHistory(task.appId, round)
+        }
         _stepsMap.update { it + (task.id to emptyList()) }
 
         // Register WORKBENCH session
@@ -93,9 +116,6 @@ class WorkbenchEngine(
         // Pre-set workspace ID so files go to the right directory
         toolExecutor.currentAppId = task.appId
         val orchestrator = AgentOrchestrator(aiService, toolExecutor)
-
-        // Detect modify scenario: workspace already has files → skip intent classification
-        val isModify = toolExecutor.workspaceManager.hasFiles(task.appId)
 
         // Mark as PLANNING
         var current = task.copy(
@@ -135,9 +155,16 @@ class WorkbenchEngine(
                 conversationMessages = messages,
                 skill = BuiltInSkills.DEFAULT,
                 enableThinking = task.enableThinking,
-                overrideIntent = if (isModify) UserIntent.MODIFY_APP else UserIntent.CREATE_APP,
+                overrideIntent = UserIntent.BUILD_APP,
                 onStep = { step ->
-                    synchronized(collectedSteps) { collectedSteps.add(step) }
+                    synchronized(collectedSteps) {
+                        val last = collectedSteps.lastOrNull()
+                        if (last != null && last.type == step.type && last.description == step.description) {
+                            collectedSteps[collectedSteps.size - 1] = step
+                        } else {
+                            collectedSteps.add(step)
+                        }
+                    }
                     _stepsMap.update { it + (task.id to synchronized(collectedSteps) { collectedSteps.toList() }) }
 
                     // Map step types to task progress
@@ -419,6 +446,35 @@ class WorkbenchEngine(
             isWorkspaceApp = true,
             entryFile = entryFile
         )
+    }
+
+    /** Save a completed round as a .md file in the workspace's his/ directory. */
+    private fun saveRoundToHistory(appId: String, round: WorkbenchRound) {
+        try {
+            val wm = WorkspaceManager(context)
+            val hisDir = java.io.File(wm.getWorkspaceDir(appId), "his").also { it.mkdirs() }
+            val df = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.getDefault())
+            val fileName = "round_${round.index + 1}_${df.format(java.util.Date(round.timestamp))}.md"
+            java.io.File(hisDir, fileName).writeText(round.toMarkdown())
+            Log.d(TAG, "Saved history round ${round.index + 1} to his/$fileName")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save history round", e)
+        }
+    }
+
+    /** Save current active steps as a completed round (called when task finishes). */
+    fun archiveCurrentRound(taskId: String, appId: String, userPrompt: String) {
+        val steps = _stepsMap.value[taskId] ?: return
+        if (steps.isEmpty()) return
+        val messages = WorkbenchMessage.fromSteps(steps)
+        val existingRounds = _roundsMap.value[taskId] ?: emptyList()
+        val round = WorkbenchRound(
+            index = existingRounds.size,
+            userPrompt = userPrompt,
+            messages = messages
+        )
+        _roundsMap.update { it + (taskId to existingRounds + round) }
+        saveRoundToHistory(appId, round)
     }
 
 }

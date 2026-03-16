@@ -33,7 +33,7 @@ object IntentClassifier {
         return when {
             MEMORY_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MEMORY_OPS
             MODULE_KEYWORDS.any { containsKeyword(lower, it) } -> UserIntent.MODULE_MGMT
-            // CREATE_APP / MODIFY_APP no longer classified here;
+            // BUILD_APP no longer classified here;
             // AI will call launch_workbench tool when appropriate
             else -> UserIntent.CONVERSATION
         }

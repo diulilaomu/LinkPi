@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.material3.MaterialTheme
@@ -71,10 +72,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.link_pi.ui.chat.ChatScreen
 import com.example.link_pi.ui.chat.ChatViewModel
 import com.example.link_pi.ui.miniapp.MiniAppListScreen
-import com.example.link_pi.ui.miniapp.MiniAppOverlayHost
-import com.example.link_pi.ui.miniapp.createMiniAppEntry
-import com.example.link_pi.ui.miniapp.createWorkspaceMiniAppEntry
 import com.example.link_pi.ui.miniapp.exportMiniApp
+import com.example.link_pi.miniapp.RunningMiniApps
+import com.example.link_pi.MiniAppActivity
+import com.example.link_pi.SshActivity
+import com.example.link_pi.data.model.MiniApp
 import com.example.link_pi.ui.settings.MemoryScreen
 import com.example.link_pi.ui.settings.CredentialScreen
 import com.example.link_pi.ui.settings.ModelEditScreen
@@ -85,16 +87,10 @@ import com.example.link_pi.ui.settings.SettingsScreen
 import com.example.link_pi.ui.settings.ShareScreen
 import com.example.link_pi.ui.settings.SecurityAuditScreen
 import com.example.link_pi.data.session.AppSessionManager
-import com.example.link_pi.data.session.AppType
-import com.example.link_pi.miniapp.WebViewPool
 import com.example.link_pi.data.SessionRegistry
 import androidx.compose.material.icons.outlined.CleaningServices
 import com.example.link_pi.ui.permission.PermissionScreen
 import com.example.link_pi.ui.permission.allPermissionsGranted
-import com.example.link_pi.ui.ssh.SshHomeScreen
-import com.example.link_pi.ui.ssh.SshHomeViewModel
-import com.example.link_pi.ui.ssh.SshScreen
-import com.example.link_pi.ui.ssh.SshViewModel
 import com.example.link_pi.ui.skill.SkillListScreen
 import com.example.link_pi.ui.workbench.WorkbenchDetailScreen
 import com.example.link_pi.ui.workbench.WorkbenchListScreen
@@ -108,7 +104,6 @@ sealed class Screen(val route: String, val title: String) {
     data object Workbench : Screen("workbench", "工作台")
     data object WorkbenchDetail : Screen("workbench/detail", "任务详情")
     data object Settings : Screen("settings", "设置")
-    data object MiniApp : Screen("miniapp", "运行应用")
     data object ModelManage : Screen("settings/models", "模型管理")
     data class ModelEdit(val modelId: String) : Screen("settings/models/edit", "编辑模型")
     data object SkillSettings : Screen("settings/skills", "Skill 管理")
@@ -134,23 +129,17 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
 
     val chatViewModel: ChatViewModel = viewModel()
     val workbenchViewModel: WorkbenchViewModel = viewModel()
-    val sshViewModel: SshViewModel = viewModel()
-    val sshHomeViewModel: SshHomeViewModel = viewModel()
     val appSessionManager = remember { AppSessionManager(context) }
-    val webViewPool = remember { WebViewPool(sessionManager = appSessionManager, context = context) }
     var currentPage by remember {
         mutableStateOf(
             when {
                 launchPage != null -> launchPage
-                launchMiniAppId != null -> Screen.MiniApp.route
                 else -> Screen.Chat.route
             }
         )
     }
     var editModelId by remember { mutableStateOf("") }
-    var isShortcutLaunch by remember { mutableStateOf(launchPage != null || launchMiniAppId != null) }
-
-    var previousPage by remember { mutableStateOf(Screen.Chat.route) }
+    var isShortcutLaunch by remember { mutableStateOf(launchPage != null) }
     var activeDetailTaskId by remember { mutableStateOf("") }
     var lastBackTime by remember { mutableLongStateOf(0L) }
     var showConversationList by remember { mutableStateOf(false) }
@@ -161,19 +150,18 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
         Unit
     }
 
-    // Cleanup WebViewPool and expired sessions when Activity is destroyed
+    // Cleanup expired sessions when Activity is destroyed
     DisposableEffect(Unit) {
         appSessionManager.cleanupExpired()
-        onDispose { webViewPool.destroyAll() }
+        onDispose { }
     }
 
-    // Handle shortcut launch: load mini app by ID (needs async storage read)
+    // Handle shortcut launch: load mini app by ID and launch standalone Activity
     LaunchedEffect(launchMiniAppId) {
         if (launchMiniAppId != null) {
             val app = chatViewModel.miniAppStorage.loadById(launchMiniAppId)
             if (app != null) {
-                chatViewModel.setCurrentApp(app)
-                currentPage = Screen.MiniApp.route
+                MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
             }
         }
     }
@@ -184,18 +172,12 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
     val pendingRequest = activity?.pendingLaunchRequest
     if (pendingRequest != null) {
         activity?.pendingLaunchRequest = null
-        if (currentPage == Screen.SshMode.route) {
-            SideEffect { sshViewModel.exitScreen() }
-        }
         when {
             pendingRequest.page != null -> {
                 currentPage = pendingRequest.page
             }
             pendingRequest.miniAppId != null -> {
                 pendingMiniAppLoad = pendingRequest.miniAppId
-                isShortcutLaunch = true
-                // Switch to MiniApp route immediately; overlay will show once app loads
-                currentPage = Screen.MiniApp.route
             }
             else -> {
                 currentPage = Screen.Chat.route
@@ -209,15 +191,7 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
         pendingMiniAppLoad = null
         val app = chatViewModel.miniAppStorage.loadById(id)
         if (app != null) {
-            chatViewModel.setCurrentApp(app)
-            // Directly show in pool — skip the extra LaunchedEffect frame
-            webViewPool.show(app.id) {
-                if (app.isWorkspaceApp) {
-                    createWorkspaceMiniAppEntry(context, app.id, app.entryFile)
-                } else {
-                    createMiniAppEntry(context, app.id, app.htmlContent)
-                }
-            }
+            MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
         }
     }
 
@@ -246,10 +220,6 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
             Screen.SessionManage.route -> currentPage = Screen.Settings.route
             Screen.ModelEdit("").route -> currentPage = Screen.ModelManage.route
             Screen.WorkbenchDetail.route -> currentPage = Screen.Workbench.route
-            Screen.MiniApp.route -> {
-                if (isShortcutLaunch) finishToDesktop()
-                else { currentPage = previousPage; isShortcutLaunch = false }
-            }
             Screen.SshHome.route -> {
                 if (isShortcutLaunch) finishToDesktop()
                 else currentPage = Screen.Workbench.route
@@ -258,40 +228,9 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
         }
     }
 
-    // MiniApp overlay lifecycle: show/hide based on currentPage and currentApp
-    val currentApp by chatViewModel.currentMiniApp.collectAsState()
-    LaunchedEffect(currentPage, currentApp?.id) {
-        if (currentPage == Screen.MiniApp.route) {
-            val app = currentApp
-            if (app != null) {
-                webViewPool.show(app.id) {
-                    if (app.isWorkspaceApp) {
-                        createWorkspaceMiniAppEntry(context, app.id, app.entryFile)
-                    } else {
-                        createMiniAppEntry(context, app.id, app.htmlContent)
-                    }
-                }
-            }
-        } else {
-            webViewPool.hideAll()
-        }
-    }
-
-    // SSH mode: full-screen terminal
+    // SSH mode: launched externally via SshActivity—redirect if somehow reached
     if (currentPage == Screen.SshMode.route) {
-        SshScreen(
-            viewModel = sshViewModel,
-            onBack = {
-                sshViewModel.exitScreen()
-                currentPage = Screen.SshHome.route
-            },
-            onDisconnect = {
-                sshViewModel.disconnect()
-                appSessionManager.destroy("builtin:ssh")
-                currentPage = Screen.SshHome.route
-            }
-        )
-        return
+        currentPage = Screen.Chat.route
     }
 
     // Edge swipe detection for opening conversation list
@@ -440,13 +379,10 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
                 Screen.Chat.route -> ChatScreen(
                     viewModel = chatViewModel,
                     onRunApp = { app ->
-                        chatViewModel.setCurrentApp(app)
-                        previousPage = currentPage
-                        currentPage = Screen.MiniApp.route
+                        MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
                     },
                     onEnterSshMode = { sessionId ->
-                        sshViewModel.enterSession(sessionId)
-                        currentPage = Screen.SshMode.route
+                        SshActivity.launchSession(context, sessionId)
                     },
                     onNavigateWorkbench = { req ->
                         val taskId = workbenchViewModel.createAndRun(
@@ -474,11 +410,9 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
                         onNewTask = {
                             currentPage = Screen.Chat.route
                         },
-                        onOpenSsh = { currentPage = Screen.SshHome.route },
+                        onOpenSsh = { SshActivity.launch(context) },
                         onRunApp = { miniApp ->
-                            chatViewModel.setCurrentApp(miniApp)
-                            previousPage = currentPage
-                            currentPage = Screen.MiniApp.route
+                            MiniAppActivity.launch(context, miniApp.id, miniApp.name, miniApp.isWorkspaceApp, miniApp.entryFile, miniApp.htmlContent)
                         }
                     )
                 }
@@ -490,20 +424,15 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
                         onRunApp = { appId ->
                             val app = workbenchViewModel.loadMiniApp(appId)
                             if (app != null) {
-                                chatViewModel.setCurrentApp(app)
-                                previousPage = currentPage
-                                currentPage = Screen.MiniApp.route
+                                MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
                             } else {
                                 Toast.makeText(context, "应用不存在或未完成生成", Toast.LENGTH_SHORT).show()
                             }
                         },
                         onReloadApp = { appId ->
-                            webViewPool.evict(appId)
                             val app = workbenchViewModel.loadMiniApp(appId)
                             if (app != null) {
-                                chatViewModel.setCurrentApp(app)
-                                previousPage = currentPage
-                                currentPage = Screen.MiniApp.route
+                                MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
                             } else {
                                 Toast.makeText(context, "应用不存在或未完成生成", Toast.LENGTH_SHORT).show()
                             }
@@ -523,38 +452,15 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
                 }
                 Screen.Apps.route -> MiniAppListScreen(
                     storage = chatViewModel.miniAppStorage,
-                    webViewPool = webViewPool,
                     onRunApp = { app ->
-                        chatViewModel.setCurrentApp(app)
-                        previousPage = currentPage
-                        currentPage = Screen.MiniApp.route
+                        MiniAppActivity.launch(context, app.id, app.name, app.isWorkspaceApp, app.entryFile, app.htmlContent)
                     }
                 )
                 Screen.SshHome.route -> {
-                    SshHomeScreen(
-                        viewModel = sshHomeViewModel,
-                        onBack = {
-                            if (isShortcutLaunch) finishToDesktop()
-                            else currentPage = Screen.Workbench.route
-                        },
-                        onEnterSession = { sessionId, manualMode ->
-                            // Save for session restore
-                            val serverInfo = sshViewModel.sshManager.getSessionInfo(sessionId)
-                            if (serverInfo != null) {
-                                val servers = com.example.link_pi.data.SavedServerStorage(context).loadAll()
-                                val matched = servers.find { it.host == serverInfo.host && it.port == serverInfo.port }
-                                if (matched != null) {
-                                    appSessionManager.suspend("builtin:ssh", AppType.BUILTIN_SSH, mapOf(
-                                        "server_id" to matched.id,
-                                        "manual_mode" to manualMode.toString()
-                                    ))
-                                }
-                            }
-                            sshViewModel.enterSession(sessionId)
-                            if (manualMode) sshViewModel.setManualMode(true)
-                            currentPage = Screen.SshMode.route
-                        }
-                    )
+                    // Redirect to SshActivity for independent task card
+                    LaunchedEffect(Unit) { SshActivity.launch(context) }
+                    // Navigate back so we don't stay on a blank page
+                    currentPage = if (isShortcutLaunch) Screen.Chat.route else Screen.Workbench.route
                 }
                 Screen.Settings.route -> SettingsScreen(
                     onNavigate = { route -> currentPage = route }
@@ -624,12 +530,23 @@ fun LinkPiApp(launchMiniAppId: String? = null, launchPage: String? = null) {
             )
         }
 
-        // ── MiniApp overlay layer (always mounted, visibility via alpha/zIndex) ──
-        MiniAppOverlayHost(
-            pool = webViewPool,
-            visible = currentPage == Screen.MiniApp.route,
-            currentApp = currentApp,
-        )
+        // ── Floating "running apps" indicator ──
+        val runningApps by RunningMiniApps.entries.collectAsState()
+        if (runningApps.isNotEmpty()) {
+            RunningAppsFloatingButton(
+                apps = runningApps,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+                onTap = { entry ->
+                    // Bring the MiniApp task to foreground
+                    val intent = Intent(context, entry.slotClass).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    }
+                    context.startActivity(intent)
+                }
+            )
+        }
+
     } // end Box
 }
 
@@ -857,4 +774,47 @@ private fun formatTime(timestamp: Long): String {
     if (timestamp == 0L) return ""
     val sdf = java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.getDefault())
     return sdf.format(java.util.Date(timestamp))
+}
+
+/**
+ * Floating button showing running MiniApps. Tap to switch back to one.
+ */
+@Composable
+private fun RunningAppsFloatingButton(
+    apps: List<RunningMiniApps.Entry>,
+    modifier: Modifier = Modifier,
+    onTap: (RunningMiniApps.Entry) -> Unit,
+) {
+    val first = apps.firstOrNull() ?: return
+    val label = if (apps.size == 1) first.appName else "${first.appName} +${apps.size - 1}"
+
+    Surface(
+        modifier = modifier.clickable { onTap(first) },
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        shadowElevation = 6.dp,
+        tonalElevation = 2.dp
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(
+                        MaterialTheme.colorScheme.primary,
+                        RoundedCornerShape(4.dp)
+                    )
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
 }

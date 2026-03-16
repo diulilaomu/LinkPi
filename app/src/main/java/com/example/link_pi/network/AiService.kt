@@ -16,6 +16,12 @@ import java.util.concurrent.TimeUnit
 private const val MAX_RETRIES = 3
 private val BACKOFF_MS = longArrayOf(2_000, 4_000, 8_000)
 
+/**
+ * API/服务端错误（非网络问题）——调用方不应按"网络中断"重试。
+ * 例如：SSE 流内错误、HTTP 4xx（非 429）、流中断但对端主动断开。
+ */
+class ApiErrorException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
 data class ChatResponse(
     val content: String,
     val thinkingContent: String = "",
@@ -160,17 +166,18 @@ class AiService(private val config: AiConfig) {
 
                     val code = resp.code
                     if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES - 1) {
-                        lastException = IOException("API $code ($endpoint): $body")
+                        lastException = ApiErrorException("API $code ($endpoint): $body")
                         delay(BACKOFF_MS[attempt])
                     } else {
-                        throw IOException("API $code ($endpoint): $body")
+                        throw ApiErrorException("API $code ($endpoint): $body")
                     }
                 }
             } catch (e: IOException) {
                 lastException = e
                 if (attempt < MAX_RETRIES - 1) {
-                    // Wait for network recovery instead of blind backoff
-                    waitForNetwork(30_000)
+                    if (e !is ApiErrorException) {
+                        waitForNetwork(30_000)
+                    }
                     delay(BACKOFF_MS[attempt])
                     continue
                 }
@@ -231,15 +238,17 @@ class AiService(private val config: AiConfig) {
                 val code = resp.code
                 val body = resp.use { it.body?.string() ?: "" }
                 if ((code == 429 || code in 500..599) && attempt < MAX_RETRIES - 1) {
-                    lastException = IOException("API $code ($endpoint): $body")
+                    lastException = ApiErrorException("API $code ($endpoint): $body")
                     delay(BACKOFF_MS[attempt])
                     continue
                 }
-                throw IOException("API $code ($endpoint): $body")
+                throw ApiErrorException("API $code ($endpoint): $body")
             } catch (e: IOException) {
                 lastException = e
                 if (attempt < MAX_RETRIES - 1) {
-                    waitForNetwork(30_000)
+                    if (e !is ApiErrorException) {
+                        waitForNetwork(30_000)
+                    }
                     delay(BACKOFF_MS[attempt])
                     continue
                 }
@@ -348,14 +357,14 @@ class AiService(private val config: AiConfig) {
             }
         }
 
-        // If an API error was detected in the SSE stream, throw so callers can handle/retry
+        // If an API error was detected in the SSE stream, throw as ApiErrorException (not network)
         if (sseError != null) {
-            throw IOException("API SSE error: $sseError")
+            throw ApiErrorException("API SSE error: $sseError")
         }
 
-        // Stream ended without [DONE] — connection was dropped (NAT timeout, proxy reset, etc.)
+        // Stream ended without [DONE] — could be connection drop or server-side cutoff
         if (!receivedDone && contentBuf.isNotEmpty() && toolCallAccumulator.isEmpty()) {
-            throw IOException("Stream disconnected without [DONE] (received ${contentBuf.length} chars)")
+            throw ApiErrorException("Stream disconnected without [DONE] (received ${contentBuf.length} chars)")
         }
 
         // finish_reason == "length" means max_tokens was hit — content is truncated

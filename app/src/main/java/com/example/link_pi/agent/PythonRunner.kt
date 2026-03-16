@@ -225,7 +225,8 @@ import builtins
 builtins.__import__ = _restricted_import
 """.trimIndent())
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to apply sandbox: ${e.message}")
+            Log.e(TAG, "Failed to apply sandbox — blocking execution: ${e.message}")
+            throw RuntimeException("Python sandbox setup failed: ${e.message}")
         }
     }
 

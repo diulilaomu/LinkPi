@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import com.example.link_pi.bridge.RuntimeErrorCollector
 import com.example.link_pi.miniapp.ShortcutHelper
 import com.example.link_pi.ui.navigation.LinkPiApp
+import com.example.link_pi.ui.navigation.Screen
 import com.example.link_pi.ui.theme.LinkpiTheme
 
 data class LaunchRequest(
@@ -28,6 +29,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         val launchMiniAppId = ShortcutHelper.getMiniAppIdFromIntent(intent)
         val launchPage = ShortcutHelper.getLaunchPageFromIntent(intent)
+
+        // SSH shortcut: redirect to independent SshActivity
+        if (launchPage == Screen.SshHome.route) {
+            SshActivity.launch(this)
+            finish()
+            return
+        }
+
         setContent {
             LinkpiTheme {
                 LinkPiApp(launchMiniAppId = launchMiniAppId, launchPage = launchPage)
@@ -39,6 +48,13 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         val miniAppId = ShortcutHelper.getMiniAppIdFromIntent(intent)
         val page = ShortcutHelper.getLaunchPageFromIntent(intent)
+
+        // SSH: redirect to independent activity
+        if (page == Screen.SshHome.route) {
+            SshActivity.launch(this)
+            return
+        }
+
         pendingLaunchRequest = LaunchRequest(miniAppId, page)
     }
 }

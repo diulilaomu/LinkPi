@@ -27,7 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
- * Confirmation card shown in chat when a CREATE_APP or MODIFY_APP intent is detected.
+ * Confirmation card shown in chat when a BUILD_APP intent is detected.
  * The user can confirm (→ navigate to workbench) or dismiss (→ cancel).
  */
 @Composable

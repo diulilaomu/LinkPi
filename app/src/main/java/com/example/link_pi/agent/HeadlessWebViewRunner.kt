@@ -46,7 +46,10 @@ object HeadlessWebViewRunner {
         val entryFile = if ("index.html" in allFiles) "index.html"
             else allFiles.firstOrNull { it.endsWith(".html", ignoreCase = true) }
             ?: return emptyList()
-        val entryContent = wm.readEntryFile(appId, entryFile) ?: return emptyList()
+
+        // Build SDK scripts upfront for injection during request interception
+        val sdkManager = SdkManager(appCtx)
+        val sdkScripts = sdkManager.buildSdkScripts(SdkModule.entries.toSet())
 
         // Clear any stale errors first
         RuntimeErrorCollector.clear(appId)
@@ -83,9 +86,15 @@ object HeadlessWebViewRunner {
                                 val mimeType = when (file.extension.lowercase()) {
                                     "html", "htm" -> "text/html"
                                     "css" -> "text/css"
-                                    "js" -> "application/javascript"
+                                    "js", "mjs" -> "application/javascript"
                                     "json" -> "application/json"
                                     else -> "application/octet-stream"
+                                }
+                                // Inject SDK scripts into entry HTML
+                                if (path == entryFile && mimeType == "text/html") {
+                                    val rawHtml = file.readText()
+                                    val injectedHtml = injectSdkScripts(rawHtml, sdkScripts)
+                                    return WebResourceResponse(mimeType, "UTF-8", injectedHtml.byteInputStream())
                                 }
                                 return WebResourceResponse(mimeType, "UTF-8", file.inputStream())
                             }
@@ -107,18 +116,8 @@ object HeadlessWebViewRunner {
                 }
             }
 
-            // Inject SDK scripts
-            val sdkManager = SdkManager(appCtx)
-            val scripts = sdkManager.buildSdkScripts(SdkModule.entries.toSet())
-            val injectedHtml = injectSdkScripts(entryContent, scripts)
-
-            webView.loadDataWithBaseURL(
-                "https://miniapp.local/$entryFile",
-                injectedHtml,
-                "text/html",
-                "UTF-8",
-                null
-            )
+            // Navigate to entry file — shouldInterceptRequest handles serving + SDK injection
+            webView.loadUrl("https://miniapp.local/$entryFile")
 
             // Wait for page load (with timeout), then allow JS to execute
             withTimeoutOrNull(LOAD_TIMEOUT_MS) {

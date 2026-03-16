@@ -41,42 +41,7 @@ object BuiltInSkills {
 5. 所有文件写入完成后，必须执行 validate 自检，有错误则立即修复。
 6. 编辑现有文件前必须先 read_file 读取（系统强制检查，否则报错）。
 7. 工具输出被截断时，可用 read_truncated_output 获取完整内容。
-8. 使用 read_plan() 获取规划阶段的架构蓝图或修改计划；使用 inspect_workspace() 获取项目架构分析。
-""".trimIndent()
-
-    val CAPABILITY_CATALOG = """
-### 能力目录
-
-以下是生成应用时可用的能力。请在规划中选择你需要的。
-
-**工具组**（代码生成时可用的 Agent 工具）：
-| 组 | 说明 |
-|-----|------|
-| NETWORK | fetch_url（HTTP GET）、web_search（互联网搜索）、save_data / load_data（Agent 端键值存储） |
-| MODULE | 调用 Python 服务模块（create_module、start_module、stop_module、call_module 等，模块是本地 Python 服务器，支持 HTTP/TCP/UDP） |
-| DEVICE | get_device_info、get_battery_level、get_location、vibrate、write_clipboard |
-| SSH | ssh_connect、ssh_exec、ssh_disconnect、ssh_upload、ssh_download、ssh_list_remote、ssh_list_sessions、ssh_port_forward — 连接远程服务器，执行命令，SFTP文件传输，端口转发。支持密码/密钥/凭据管理器认证 |
-
-**NativeBridge API**（生成应用的 WebView 中可用的 JavaScript API）：
-| 组 | API |
-|-----|-----|
-| STORAGE | saveData、loadData、removeData、clearData、listKeys、getAppId |
-| UI_FEEDBACK | showToast、vibrate、writeClipboard、sendToApp |
-| SENSOR | getDeviceInfo、getBatteryLevel、getLocation |
-| NETWORK | nativeFetch(url, options) — 绕过 CORS 的 HTTP 请求；callModule(moduleName, path, options) — 调用运行中的 Python 服务模块（Promise）；listModules() — 列出所有模块及运行状态 |
-| REALTIME | startServer(port) — 启动 WebSocket 服务器（Promise）；onServerEvent — 服务器事件回调；serverSend/serverBroadcast — 发送消息；stopServer()；getLocalIp() — 获取局域网IP。客户端用标准 new WebSocket('ws://ip:port') 连接 |
-
-**CDN 库**（国内可访问的 CDN 链接，作为文档注入）：
-| 组 | 库 |
-|-----|------|
-| FRAMEWORK | Vue 2/3、React、ReactDOM |
-| CHART | Chart.js |
-| THREE_D | Three.js |
-| UTILS | Axios、Animate.css |
-
-⚡ **模块优先原则**：开发功能时优先使用已有模块（list_modules 查看）。模块不支持的功能，再用上方底层能力组合开发。
-
-注意：基础文件工具（write_file、读取、编辑等）在生成阶段始终可用。你只需选择上方的额外能力。
+8. 使用 read_plan() 获取规划阶段的开发计划；使用 inspect_workspace() 获取项目架构分析。
 """.trimIndent()
 
     /** SSH 专用模式系统提示 — 只生成命令，不做其他任何事 */
@@ -130,21 +95,14 @@ object BuiltInSkills {
     private val SYS_CAPABILITY_CATALOG = Skill(
         id = "sys_capability_catalog", name = "能力目录", icon = "📑",
         description = "规划阶段 AI 可选择的能力组清单",
-        systemPrompt = PromptCreate.CAPABILITY_CATALOG,
+        systemPrompt = PromptApp.CAPABILITY_CATALOG,
         isBuiltIn = true
     )
 
-    private val SYS_WF_CREATE = Skill(
-        id = "sys_wf_create", name = "创建应用工作流", icon = "🆕",
-        description = "规划 + 生成阶段的创建应用流程",
-        systemPrompt = "## 规划阶段\n\n${PromptCreate.planning()}\n\n---\n\n## 生成阶段\n\n${PromptCreate.generation()}",
-        isBuiltIn = true
-    )
-
-    private val SYS_WF_MODIFY = Skill(
-        id = "sys_wf_modify", name = "修改应用工作流", icon = "✏️",
-        description = "规划 + 生成阶段的修改应用流程",
-        systemPrompt = "## 规划阶段\n\n${PromptModify.planning()}\n\n---\n\n## 生成阶段\n\n${PromptModify.generation()}",
+    private val SYS_WF_APP = Skill(
+        id = "sys_wf_app", name = "应用开发工作流", icon = "📱",
+        description = "规划 + 生成阶段的应用开发流程（创建和修改统一）",
+        systemPrompt = "## 规划阶段\n\n${PromptApp.planning()}\n\n---\n\n## 生成阶段\n\n${PromptApp.generation()}",
         isBuiltIn = true
     )
 
@@ -172,7 +130,7 @@ object BuiltInSkills {
     /** 系统与工作流模板（在 SKILL 管理中展示，不可选为活跃角色） */
     val systemTemplates: List<Skill> = listOf(
         SYS_AGENT_MODE, SYS_RULES, SYS_CAPABILITY_CATALOG,
-        SYS_WF_CREATE, SYS_WF_MODIFY, SYS_WF_MODULE, SYS_WF_SSH, SYS_MEMORY
+        SYS_WF_APP, SYS_WF_MODULE, SYS_WF_SSH, SYS_MEMORY
     )
 
     // ═══════════════════════════════════════

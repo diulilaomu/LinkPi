@@ -8,6 +8,7 @@ object PromptDomain {
     enum class Phase {
         PLANNING,
         GENERATION,
+        SUB_EXECUTION,
         SELF_CHECK
     }
 }

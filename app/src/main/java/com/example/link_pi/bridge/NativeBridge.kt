@@ -204,7 +204,7 @@ class NativeBridge(
                 val result = svc.callHttp(module.id, path, method, body.ifBlank { null })
                 callbackToJs(callbackId, result)
             } catch (e: Exception) {
-                callbackToJs(callbackId, """{"error":"${e.message?.replace("\"", "'")}"}""")
+                callbackToJs(callbackId, org.json.JSONObject().apply { put("error", e.message ?: "Unknown error") }.toString())
             }
         }
     }

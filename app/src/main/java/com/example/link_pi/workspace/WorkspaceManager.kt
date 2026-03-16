@@ -185,8 +185,8 @@ class WorkspaceManager(private val context: Context) {
             val firstLine = normOld.lines().firstOrNull()?.trim() ?: ""
             val hint = if (firstLine.isNotEmpty()) {
                 val lineNum = contentLines.indexOfFirst { it.trim().contains(firstLine) }
-                if (lineNum >= 0) " Hint: similar text found near line ${lineNum + 1}. Use read_workspace_file to re-read the file, or use replace_lines with line numbers."
-                else " The first line of old_text was not found anywhere. Re-read the file with read_workspace_file and try again."
+                if (lineNum >= 0) " Hint: similar text found near line ${lineNum + 1}. Use read_file to re-read the file, or use edit_file(command=replace_lines) with line numbers."
+                else " The first line of old_text was not found anywhere. Re-read the file with read_file and try again."
             } else ""
             return "Error: text not found in $relativePath.$hint"
         }
@@ -542,7 +542,7 @@ class WorkspaceManager(private val context: Context) {
         if (!root.exists()) return emptyList()
         val files = mutableListOf<String>()
         root.walkTopDown()
-            .onEnter { it.name != ".snapshots" }
+            .onEnter { it.name != ".snapshots" && it.name != "his" }
             .filter { it.isFile && it.name !in META_FILES }.forEach { file ->
             files.add(file.relativeTo(root).path.replace("\\", "/"))
         }

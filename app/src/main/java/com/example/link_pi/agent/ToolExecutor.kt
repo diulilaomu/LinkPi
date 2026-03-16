@@ -104,6 +104,9 @@ class ToolExecutor(
         // Workbench aliases
         "create_app" to "launch_workbench",
         "open_workbench" to "launch_workbench",
+        "save_app" to "write_file",
+        "saveFile" to "write_file",
+        "writeFile" to "write_file",
     )
 
     /** All tool definitions the AI can use. */
@@ -374,8 +377,8 @@ class ToolExecutor(
             emptyList()
         ),
         ToolDef(
-            "read_plan", "读取规划阶段缓存的架构蓝图或修改计划。规划完成后系统自动缓存，生成阶段可调此工具获取",
-            listOf(ToolParam("key", "string", "缓存键: architecture（架构蓝图）、modification_plan（修改计划）。留空返回全部", required = false))
+            "read_plan", "读取规划阶段缓存的应用开发计划。规划完成后系统自动缓存，生成阶段可调此工具获取",
+            listOf(ToolParam("key", "string", "缓存键: plan（开发计划）。留空返回全部", required = false))
         ),
 
         // ── Workbench ──
@@ -625,7 +628,13 @@ class ToolExecutor(
                 "ssh_list_remote" -> executeSshListRemote(args)
                 "ssh_list_sessions" -> executeSshListSessions()
                 "ssh_port_forward" -> executeSshPortForward(args)
-                else -> return@withContext ToolResult(normalizedCall.toolName, false, "Error: 未知工具: ${normalizedCall.toolName}")
+                else -> {
+                    val suggestion = toolDefs.map { it.name }
+                        .minByOrNull { levenshtein(it, normalizedCall.toolName) }
+                    val hint = if (suggestion != null) " 你是否要调用: $suggestion?" else ""
+                    return@withContext ToolResult(normalizedCall.toolName, false,
+                        "Error: 未知工具: ${normalizedCall.toolName}。$hint 请使用 tools 列表中定义的工具名称。")
+                }
             }
             val success = !result.startsWith("Error:")
             // If a file tool failed or returned empty on an uninitialized workspace, hint to open_app_workspace
@@ -650,6 +659,19 @@ class ToolExecutor(
         "insert_lines", "file_info", "list_snapshots",
         "validate_html", "validate_js"
     )
+
+    private fun levenshtein(a: String, b: String): Int {
+        val dp = Array(a.length + 1) { IntArray(b.length + 1) }
+        for (i in 0..a.length) dp[i][0] = i
+        for (j in 0..b.length) dp[0][j] = j
+        for (i in 1..a.length) for (j in 1..b.length) {
+            dp[i][j] = minOf(
+                dp[i - 1][j] + 1, dp[i][j - 1] + 1,
+                dp[i - 1][j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1
+            )
+        }
+        return dp[a.length][b.length]
+    }
 
     /**
      * If a file tool fails/returns empty on a workspace with no files,
@@ -829,10 +851,11 @@ class ToolExecutor(
             return "Error: 不允许访问私有/内网地址"
         }
         val request = Request.Builder().url(url).get().build()
-        val response = getSecureHttpClient().newCall(request).execute()
-        val body = response.body?.string() ?: ""
-        // Limit response size
-        return if (body.length > 4000) body.take(4000) + "\n...(已截断)" else body
+        return getSecureHttpClient().newCall(request).execute().use { response ->
+            val body = response.body?.string() ?: ""
+            // Limit response size
+            if (body.length > 4000) body.take(4000) + "\n...(已截断)" else body
+        }
     }
 
     private fun executeWebSearch(args: Map<String, String>): String {
@@ -845,9 +868,10 @@ class ToolExecutor(
             .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             .get()
             .build()
-        val response = httpClient.newCall(request).execute()
-        val html = response.body?.string() ?: return "Error: 搜索请求失败"
-        return parseDuckDuckGoResults(html, count)
+        return httpClient.newCall(request).execute().use { response ->
+            val html = response.body?.string() ?: return@use "Error: 搜索请求失败"
+            parseDuckDuckGoResults(html, count)
+        }
     }
 
     private fun parseDuckDuckGoResults(html: String, count: Int): String {

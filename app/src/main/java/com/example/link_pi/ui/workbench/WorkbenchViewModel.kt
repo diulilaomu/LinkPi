@@ -11,6 +11,7 @@ import com.example.link_pi.workbench.TaskStatus
 import com.example.link_pi.workbench.GenerationService
 import com.example.link_pi.workbench.WorkbenchTask
 import com.example.link_pi.workbench.WorkbenchTaskStorage
+import com.example.link_pi.workbench.WorkbenchRound
 import com.example.link_pi.workspace.WorkspaceManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,7 @@ class WorkbenchViewModel(application: Application) : AndroidViewModel(applicatio
     /** Tasks, steps, and running state are all observed from the service's static flows. */
     val tasks: StateFlow<List<WorkbenchTask>> = GenerationService.tasks
     val engineStepsMap: StateFlow<Map<String, List<AgentStep>>> = GenerationService.stepsMap
+    val roundsMap: StateFlow<Map<String, List<WorkbenchRound>>> = GenerationService.roundsMap
 
     private val _activeTaskId = MutableStateFlow<String?>(null)
     val activeTaskId: StateFlow<String?> = _activeTaskId

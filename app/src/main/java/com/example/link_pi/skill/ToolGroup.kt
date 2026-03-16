@@ -38,12 +38,11 @@ enum class CdnGroup {
 /** User intent — determined by AI pre-classification. */
 enum class UserIntent {
     CONVERSATION,
-    CREATE_APP,
-    MODIFY_APP,
+    BUILD_APP,
     MODULE_MGMT,
     MEMORY_OPS;
 
-    fun needsApp(): Boolean = this == CREATE_APP || this == MODIFY_APP
+    fun needsApp(): Boolean = this == BUILD_APP
 }
 
 /** Agent execution phase. */
@@ -131,23 +130,10 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
         UserIntent.CONVERSATION, UserIntent.MEMORY_OPS -> {
             groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.DEVICE, ToolGroup.NETWORK))
         }
-        UserIntent.CREATE_APP -> {
+        UserIntent.BUILD_APP -> {
             when (phase) {
                 AgentPhase.PLANNING -> {
-                    groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.MODULE))
-                }
-                AgentPhase.GENERATION -> {
-                    groups.addAll(listOf(ToolGroup.APP_CREATE, ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING, ToolGroup.NETWORK))
-                }
-                AgentPhase.REFINEMENT -> {
-                    groups.addAll(listOf(ToolGroup.APP_READ, ToolGroup.APP_EDIT, ToolGroup.CODING))
-                }
-            }
-        }
-        UserIntent.MODIFY_APP -> {
-            when (phase) {
-                AgentPhase.PLANNING -> {
-                    // Planning is read-only: explore workspace, read code, plan modifications
+                    // Read-only: explore workspace, read code, plan
                     groups.addAll(listOf(ToolGroup.MEMORY, ToolGroup.APP_READ, ToolGroup.APP_NAVIGATE, ToolGroup.CODING, ToolGroup.MODULE))
                 }
                 AgentPhase.GENERATION -> {
@@ -164,7 +150,7 @@ fun resolveToolGroups(intent: UserIntent, phase: AgentPhase, extraGroups: Set<To
     }
 
     // Add Skill-level extra groups (skip during Planning to keep prompt focused)
-    if (!(phase == AgentPhase.PLANNING && (intent == UserIntent.CREATE_APP || intent == UserIntent.MODIFY_APP))) {
+    if (!(phase == AgentPhase.PLANNING && intent == UserIntent.BUILD_APP)) {
         groups.addAll(extraGroups)
     }
 

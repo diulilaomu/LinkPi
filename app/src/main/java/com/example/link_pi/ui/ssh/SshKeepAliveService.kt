@@ -100,10 +100,18 @@ class KeepAliveService : Service() {
     }
 
     private fun buildNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+        // If SSH is the active client, route tap to SshActivity; otherwise to MainActivity
+        val targetIntent = if (clients.containsKey("ssh")) {
+            Intent(this, com.example.link_pi.SshActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
+        } else {
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
+            }
         }
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(this, 0, targetIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val labels = clients.values.toList()
         val text = when {
             labels.isEmpty() -> "运行中"
@@ -122,7 +130,7 @@ class KeepAliveService : Service() {
     private fun acquireWakeLock() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LinkPi:KeepAlive").apply {
-            acquire()
+            acquire(4 * 60 * 60 * 1000L) // 4h safety timeout
         }
     }
 

@@ -11,6 +11,7 @@ import android.net.Uri
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
+import com.example.link_pi.MiniAppActivity
 import com.example.link_pi.MainActivity
 import java.io.File
 
@@ -24,10 +25,10 @@ object ShortcutHelper {
     fun pinToHomeScreen(context: Context, appId: String, label: String, iconPath: String?) {
         if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return
 
-        val intent = Intent(context, MainActivity::class.java).apply {
+        val intent = Intent(context, MiniAppActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             putExtra(EXTRA_MINIAPP_ID, appId)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
         }
 
         val bitmap = loadIconBitmap(context, iconPath)
@@ -57,6 +58,28 @@ object ShortcutHelper {
         val icon = IconCompat.createWithBitmap(bitmap)
 
         val shortcut = ShortcutInfoCompat.Builder(context, "builtin_$pageRoute")
+            .setShortLabel(label)
+            .setLongLabel(label)
+            .setIcon(icon)
+            .setIntent(intent)
+            .build()
+
+        ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
+    }
+
+    /** Pin SSH terminal (standalone Activity) to the home screen. */
+    fun pinSshToHomeScreen(context: Context, label: String, iconPath: String?) {
+        if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return
+
+        val intent = Intent(context, com.example.link_pi.SshActivity::class.java).apply {
+            action = Intent.ACTION_VIEW
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_MULTIPLE_TASK)
+        }
+
+        val bitmap = loadIconBitmap(context, iconPath)
+        val icon = IconCompat.createWithBitmap(bitmap)
+
+        val shortcut = ShortcutInfoCompat.Builder(context, "builtin_ssh")
             .setShortLabel(label)
             .setLongLabel(label)
             .setIcon(icon)

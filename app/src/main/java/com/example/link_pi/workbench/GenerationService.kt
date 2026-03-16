@@ -57,6 +57,10 @@ class GenerationService : Service() {
         private val _stepsMap = MutableStateFlow<Map<String, List<AgentStep>>>(emptyMap())
         val stepsMap: StateFlow<Map<String, List<AgentStep>>> = _stepsMap.asStateFlow()
 
+        /** Observable historical rounds per task. */
+        private val _roundsMap = MutableStateFlow<Map<String, List<WorkbenchRound>>>(emptyMap())
+        val roundsMap: StateFlow<Map<String, List<WorkbenchRound>>> = _roundsMap.asStateFlow()
+
         /** Running task IDs. */
         private val _runningIds = MutableStateFlow<Set<String>>(emptySet())
         val runningIds: StateFlow<Set<String>> = _runningIds.asStateFlow()
@@ -67,6 +71,7 @@ class GenerationService : Service() {
 
         fun clearSteps(taskId: String) {
             _stepsMap.update { it - taskId }
+            _roundsMap.update { it - taskId }
         }
 
         fun runTask(context: Context, taskId: String) {
@@ -129,6 +134,9 @@ class GenerationService : Service() {
         serviceScope.launch {
             engine.stepsMap.collect { _stepsMap.value = it }
         }
+        serviceScope.launch {
+            engine.roundsMap.collect { _roundsMap.value = it }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -170,10 +178,12 @@ class GenerationService : Service() {
 
         val job = serviceScope.launch {
             try {
-                engine.execute(reset) { updated ->
+                val result = engine.execute(reset) { updated ->
                     broadcastUpdate(updated)
                     updateNotification(updated.currentStep)
                 }
+                // Archive this round's steps as history
+                engine.archiveCurrentRound(taskId, result.appId, result.userPrompt)
             } catch (e: Exception) {
                 Log.e(TAG, "Task $taskId failed", e)
                 val failed = taskStorage.loadById(taskId)
@@ -210,10 +220,12 @@ class GenerationService : Service() {
 
         val job = serviceScope.launch {
             try {
-                engine.execute(updated) { step ->
+                val result = engine.execute(updated) { step ->
                     broadcastUpdate(step)
                     updateNotification(step.currentStep)
                 }
+                // Archive this round's steps as history
+                engine.archiveCurrentRound(taskId, result.appId, result.userPrompt)
             } catch (e: Exception) {
                 Log.e(TAG, "Task $taskId modify failed", e)
                 val failed = taskStorage.loadById(taskId)
